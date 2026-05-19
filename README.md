@@ -54,6 +54,8 @@ https://github.com/user-attachments/assets/56834720-599e-4461-b712-fff7b85fb128
 
 ## Usage
 Install cmake, via package manager, or VisualStudio on Windows
+
+
 Standalone install:
 ```sh
 cargo install jackdaw
