@@ -9,17 +9,22 @@
 //! inline in the operator body. Escape goes through the global
 //! `modal.cancel` chain.
 
+use bevy::ecs::system::SystemParam;
+use bevy::feathers::cursor::{EntityCursor, OverrideCursor};
 use bevy::prelude::*;
+use bevy::window::SystemCursorIcon;
 use jackdaw_api::prelude::*;
 use jackdaw_api_internal::lifecycle::ActiveModalOperator;
 use jackdaw_jsn::Brush;
 
+use crate::brush::box_select::BrushBoxSelectState;
 use crate::brush::interaction::{
     FaceExtrudeMode, PendingSubDrag, VertexDragConstraint, compute_brush_drag_offset,
 };
 use crate::brush::{
-    BrushDragState, BrushEditMode, BrushFaceEntity, BrushMeshCache, BrushSelection, EdgeDragState,
-    EditMode, VertexDragState, rebuild_brush_from_vertices,
+    BrushDragCapture, BrushDragState, BrushEditMode, BrushFaceEntity, BrushMeshCache,
+    BrushSelection, BrushSubSelection, EdgeDragState, EditMode, VertexDragState,
+    rebuild_brush_from_vertices,
 };
 use crate::draw_brush::DrawBrushState;
 use crate::keybind_focus::KeybindFocus;
@@ -34,6 +39,28 @@ const MIN_EXTRUDE_DEPTH: f32 = 0.01;
 
 /// Pixels the cursor must travel after a press to promote pending -> active.
 const DRAG_THRESHOLD: f32 = 5.0;
+
+/// Brush geometry queries used by `brush_face_drag` for face picking and the
+/// drag edit. Bundling keeps the operator under Bevy's system-param ceiling.
+#[derive(SystemParam)]
+struct FacePickParams<'w, 's> {
+    face_entities: Query<'w, 's, (Entity, &'static BrushFaceEntity, &'static GlobalTransform)>,
+    brush_caches: Query<'w, 's, &'static BrushMeshCache>,
+    brushes: Query<'w, 's, (&'static mut Brush, &'static GlobalTransform)>,
+}
+
+/// Show the grabbing cursor while a geometry drag is active.
+fn set_grab_cursor(override_cursor: &mut OverrideCursor) {
+    override_cursor.0 = Some(EntityCursor::System(SystemCursorIcon::Grabbing));
+}
+
+/// Clear the grabbing cursor when a geometry drag ends, leaving any cursor
+/// owned by another system untouched.
+fn clear_grab_cursor(override_cursor: &mut OverrideCursor) {
+    if override_cursor.0 == Some(EntityCursor::System(SystemCursorIcon::Grabbing)) {
+        override_cursor.0 = None;
+    }
+}
 
 pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
     ctx.register_operator::<BrushFaceDragOp>()
@@ -111,6 +138,7 @@ pub(crate) fn face_drag_invoke_trigger(
     modal: Res<ModalTransformState>,
     draw_state: Res<DrawBrushState>,
     vp: ViewportCursor,
+    gizmo_hover: Res<crate::gizmos::GizmoHoverState>,
     mut commands: Commands,
 ) {
     if !mouse.just_pressed(MouseButton::Left) || drag_state.active || drag_state.pending.is_some() {
@@ -123,6 +151,13 @@ pub(crate) fn face_drag_invoke_trigger(
     }
 
     let in_face_edit = matches!(*edit_mode, EditMode::BrushEdit(BrushEditMode::Face));
+
+    // In face-edit mode a hovered gizmo axis owns the click; the sub-element
+    // gizmo drag takes it via `gizmo.drag_edit`. (Object-mode extrude via
+    // shift/alt is unaffected.)
+    if in_face_edit && gizmo_hover.hovered_axis.is_some() {
+        return;
+    }
     let shift = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let alt = keyboard.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     if !(in_face_edit || shift || alt) {
@@ -159,16 +194,16 @@ pub fn brush_face_drag(
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     vp: ViewportCursor,
-    face_entities: Query<(Entity, &BrushFaceEntity, &GlobalTransform)>,
-    brush_caches: Query<&BrushMeshCache>,
+    mut params: FacePickParams,
     selection: Res<Selection>,
     snap_settings: Res<SnapSettings>,
     mut brush_selection: ResMut<BrushSelection>,
-    mut brushes: Query<(&mut Brush, &GlobalTransform)>,
+    mut brush_box_state: ResMut<BrushBoxSelectState>,
     mut drag_state: ResMut<BrushDragState>,
     mut commands: Commands,
     modal: Option<Single<Entity, With<ActiveModalOperator>>>,
     mut halfedge_q: Query<&mut crate::brush::BrushHalfedge>,
+    mut override_cursor: ResMut<OverrideCursor>,
 ) -> OperatorResult {
     let cursor_pos = vp.cursor()?;
     // First invoke uses the hovered viewport; subsequent invokes use
@@ -193,21 +228,110 @@ pub fn brush_face_drag(
     let in_face_edit = matches!(*edit_mode, EditMode::BrushEdit(BrushEditMode::Face));
     let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
     let alt = keyboard.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let shift = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
 
     if modal.is_none() {
         // First-invoke: pick a face under the cursor, set pending /
         // selection / quick-action.
-        let brush_entity = if in_face_edit {
-            brush_selection.entity
-        } else {
-            selection.primary().filter(|&e| brushes.contains(e))
-        };
-        let brush_entity = brush_entity?;
-        let cache = brush_caches.get(brush_entity)?;
+        //
+        // In face-edit mode, hit-test across all edit brushes and pick the
+        // nearest face. A plain click clears other brushes' sub-selections.
+        // Ctrl extends (toggle) on the clicked brush. In object mode the
+        // single primary-selected brush is used as before.
+        if in_face_edit {
+            let candidates: Vec<Entity> = brush_selection.edit_brushes().collect();
+
+            let mut best: Option<(Entity, usize)> = None;
+            let mut best_depth = f32::MAX;
+
+            for candidate in &candidates {
+                let brush_entity = *candidate;
+                let Ok(cache) = params.brush_caches.get(brush_entity) else {
+                    continue;
+                };
+                for (_, face_ent, face_global) in &params.face_entities {
+                    if face_ent.brush_entity != brush_entity {
+                        continue;
+                    }
+                    let polygon = &cache.face_polygons[face_ent.face_index];
+                    if polygon.len() < 3 {
+                        continue;
+                    }
+                    let screen_verts: Vec<Vec2> = polygon
+                        .iter()
+                        .filter_map(|&vi| {
+                            camera
+                                .world_to_viewport(
+                                    cam_tf,
+                                    face_global.transform_point(cache.vertices[vi]),
+                                )
+                                .ok()
+                        })
+                        .collect();
+                    if screen_verts.len() < 3 {
+                        continue;
+                    }
+                    if point_in_polygon_2d(viewport_cursor, &screen_verts) {
+                        let centroid: Vec3 =
+                            polygon.iter().map(|&vi| cache.vertices[vi]).sum::<Vec3>()
+                                / polygon.len() as f32;
+                        let depth = (cam_tf.translation() - face_global.transform_point(centroid))
+                            .length_squared();
+                        if depth < best_depth {
+                            best_depth = depth;
+                            best = Some((brush_entity, face_ent.face_index));
+                        }
+                    }
+                }
+            }
+
+            let Some((brush_entity, face_idx)) = best else {
+                // No face hit. Ctrl is additive-toggle, so an empty
+                // Ctrl-click is a no-op. Otherwise hand the press to the
+                // edit-mode box-select (Shift records an add-select);
+                // staying in edit mode either way.
+                if !ctrl {
+                    brush_box_state.pending = Some(cursor_pos);
+                    brush_box_state.shift = shift;
+                }
+                return OperatorResult::Cancelled;
+            };
+
+            brush_selection.active_brush = Some(brush_entity);
+            drag_state.quick_action = false;
+
+            if ctrl {
+                // Ctrl+click: toggle on the clicked brush; leave other brushes untouched.
+                let sub = brush_selection.sub_mut(brush_entity);
+                if let Some(pos) = sub.faces.iter().position(|&f| f == face_idx) {
+                    sub.faces.remove(pos);
+                } else {
+                    sub.faces.push(face_idx);
+                }
+                return OperatorResult::Cancelled;
+            }
+
+            // Plain click: clear every brush's sub-selection, then select the clicked face.
+            brush_selection.clear_sub_selections();
+            brush_selection.sub_mut(brush_entity).faces = vec![face_idx];
+            drag_state.extrude_mode = FaceExtrudeMode::Merge;
+            drag_state.pending = Some(PendingSubDrag {
+                click_pos: cursor_pos,
+            });
+            drag_state.drag_camera = Some(camera_entity);
+            drag_state.drag_viewport = Some(viewport_entity);
+            return OperatorResult::Running;
+        }
+
+        // Object-mode quick-action: single brush path (unchanged).
+        let brush_entity = selection
+            .primary()
+            .filter(|&e| params.brushes.contains(e))?;
+        let cache = params.brush_caches.get(brush_entity)?;
 
         let mut best_face = None;
         let mut best_depth = f32::MAX;
-        for (_, face_ent, face_global) in &face_entities {
+        for (_, face_ent, face_global) in &params.face_entities {
             if face_ent.brush_entity != brush_entity {
                 continue;
             }
@@ -239,41 +363,18 @@ pub fn brush_face_drag(
         }
 
         let Some(face_idx) = best_face else {
-            // No face hit. If we were in face mode and not Ctrl-clicking,
-            // exit to Object as the legacy click-out behavior.
-            if in_face_edit && !ctrl {
-                *edit_mode = EditMode::Object;
-                brush_selection.clear();
-            }
             return OperatorResult::Cancelled;
         };
 
-        if !in_face_edit {
-            *edit_mode = EditMode::BrushEdit(BrushEditMode::Face);
-            brush_selection.entity = Some(brush_entity);
-            brush_selection.faces.clear();
-            brush_selection.vertices.clear();
-            brush_selection.edges.clear();
-            drag_state.quick_action = true;
-        }
+        *edit_mode = EditMode::BrushEdit(BrushEditMode::Face);
+        brush_selection.active_brush = Some(brush_entity);
+        brush_selection.sub_mut(brush_entity).clear();
+        drag_state.quick_action = true;
 
-        if in_face_edit && ctrl {
-            // Ctrl+click in face mode: toggle multi-select (no drag).
-            if let Some(pos) = brush_selection.faces.iter().position(|&f| f == face_idx) {
-                brush_selection.faces.remove(pos);
-            } else {
-                brush_selection.faces.push(face_idx);
-            }
-            return OperatorResult::Cancelled;
-        }
-
-        brush_selection.faces = vec![face_idx];
-        drag_state.extrude_mode = if !in_face_edit && alt {
+        brush_selection.sub_mut(brush_entity).faces = vec![face_idx];
+        drag_state.extrude_mode = if alt {
             FaceExtrudeMode::Extend
         } else {
-            if in_face_edit {
-                drag_state.quick_action = false;
-            }
             FaceExtrudeMode::Merge
         };
         drag_state.pending = Some(PendingSubDrag {
@@ -308,6 +409,7 @@ pub fn brush_face_drag(
         }
         let was_quick = drag_state.quick_action;
         clear_face_drag_state(&mut drag_state);
+        clear_grab_cursor(&mut override_cursor);
         if was_quick {
             *edit_mode = EditMode::Object;
             brush_selection.clear();
@@ -319,12 +421,17 @@ pub fn brush_face_drag(
         && mouse.pressed(MouseButton::Left)
         && !drag_state.active
         && (cursor_pos - pending.click_pos).length() > DRAG_THRESHOLD
-        && let Some(brush_entity) = brush_selection.entity
-        && let Ok((brush, brush_global)) = brushes.get(brush_entity)
+        && let Some(brush_entity) = brush_selection.active_brush
+        && let Ok((brush, brush_global)) = params.brushes.get(brush_entity)
     {
         drag_state.active = true;
+        set_grab_cursor(&mut override_cursor);
         drag_state.start_cursor = viewport_cursor;
-        if let Some(&face_idx) = brush_selection.faces.first()
+        let active_faces: Vec<usize> = brush_selection
+            .sub(brush_entity)
+            .map(|s| s.faces.clone())
+            .unwrap_or_default();
+        if let Some(&face_idx) = active_faces.first()
             && face_idx < brush.faces.len()
         {
             drag_state.drag_face_normal = brush.faces[face_idx].plane.normal;
@@ -337,8 +444,8 @@ pub fn brush_face_drag(
                 let (_, brush_rot, _) = brush_global.to_scale_rotation_translation();
                 drag_state.extend_face_normal =
                     (brush_rot * drag_state.drag_face_normal).normalize();
-                if let Ok(cache) = brush_caches.get(brush_entity)
-                    && let Some(&face_idx) = brush_selection.faces.first()
+                if let Ok(cache) = params.brush_caches.get(brush_entity)
+                    && let Some(&face_idx) = active_faces.first()
                 {
                     drag_state.extend_face_polygon = cache.face_polygons[face_idx]
                         .iter()
@@ -351,10 +458,14 @@ pub fn brush_face_drag(
     }
 
     if drag_state.active {
-        let brush_entity = brush_selection.entity?;
+        let brush_entity = brush_selection.active_brush?;
+        let drag_faces: Vec<usize> = brush_selection
+            .sub(brush_entity)
+            .map(|s| s.faces.clone())
+            .unwrap_or_default();
         match drag_state.extrude_mode {
             FaceExtrudeMode::Merge => {
-                let (mut brush, brush_global) = brushes.get_mut(brush_entity)?;
+                let (mut brush, brush_global) = params.brushes.get_mut(brush_entity)?;
                 let start = drag_state.start_brush.as_ref()?;
                 let brush_pos = brush_global.translation();
                 let Ok(origin_screen) = camera.world_to_viewport(cam_tf, brush_pos) else {
@@ -383,7 +494,7 @@ pub fn brush_face_drag(
                     use std::collections::HashSet;
                     let mut translated: HashSet<jackdaw_geometry::halfedge::VertKey> =
                         HashSet::new();
-                    for &face_idx in &brush_selection.faces {
+                    for &face_idx in &drag_faces {
                         if face_idx >= face_keys.len() {
                             continue;
                         }
@@ -450,7 +561,7 @@ pub fn brush_face_drag(
                     brush.topology = new_topology;
                 } else {
                     // Legacy convex path: just shift plane.distance.
-                    for &face_idx in &brush_selection.faces {
+                    for &face_idx in &drag_faces {
                         if face_idx < start.faces.len() && face_idx < brush.faces.len() {
                             brush.faces[face_idx].plane.distance =
                                 start.faces[face_idx].plane.distance + drag_amount;
@@ -492,33 +603,22 @@ fn cancel_face_drag(
     mut brushes: Query<&mut Brush>,
     mut drag_state: ResMut<BrushDragState>,
     mut halfedge_q: Query<&mut crate::brush::BrushHalfedge>,
+    mut override_cursor: ResMut<OverrideCursor>,
 ) {
     if drag_state.extrude_mode == FaceExtrudeMode::Merge
-        && let Some(brush_entity) = brush_selection.entity
+        && let Some(brush_entity) = brush_selection.active_brush
         && let Some(ref start) = drag_state.start_brush
         && let Ok(mut brush) = brushes.get_mut(brush_entity)
     {
         *brush = start.clone();
         // If HalfedgeMesh was active, re-lift from the restored topology.
         if let Ok(mut halfedge) = halfedge_q.get_mut(brush_entity) {
-            let mesh =
-                jackdaw_geometry::halfedge::HalfedgeMesh::lift_from_topology(&start.topology);
-            let vert_keys: Vec<_> = mesh.verts.keys().collect();
-            let mut face_keys: Vec<jackdaw_geometry::halfedge::FaceKey> =
-                vec![Default::default(); mesh.faces.len()];
-            for (k, f) in mesh.faces.iter() {
-                let slot = f.material_idx as usize;
-                if slot < face_keys.len() {
-                    face_keys[slot] = k;
-                }
-            }
-            halfedge.mesh = mesh;
-            halfedge.vert_keys = vert_keys;
-            halfedge.face_keys = face_keys;
+            *halfedge = crate::brush::BrushHalfedge::from_topology(&start.topology);
         }
     }
     let was_quick = drag_state.quick_action;
     clear_face_drag_state(&mut drag_state);
+    clear_grab_cursor(&mut override_cursor);
     if was_quick {
         *edit_mode = EditMode::Object;
         brush_selection.clear();
@@ -675,6 +775,7 @@ pub(crate) fn vertex_drag_invoke_trigger(
     drag_state: Res<VertexDragState>,
     keybind_focus: KeybindFocus,
     vp: ViewportCursor,
+    gizmo_hover: Res<crate::gizmos::GizmoHoverState>,
     mut commands: Commands,
 ) {
     if !mouse.just_pressed(MouseButton::Left)
@@ -683,6 +784,9 @@ pub(crate) fn vertex_drag_invoke_trigger(
         || drag_state.pending.is_some()
         || keybind_focus.is_typing()
         || vp.viewport_entity().is_none()
+        // A hovered gizmo axis owns the click; the sub-element gizmo drag
+        // takes it via `gizmo.drag_edit`.
+        || gizmo_hover.hovered_axis.is_some()
     {
         return;
     }
@@ -708,20 +812,20 @@ pub(crate) fn vertex_drag_invoke_trigger(
 )]
 pub fn brush_vertex_drag(
     _: In<OperatorParameters>,
-    mut edit_mode: ResMut<EditMode>,
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     vp: ViewportCursor,
     brush_transforms: Query<&GlobalTransform>,
     mut brush_selection: ResMut<BrushSelection>,
+    mut brush_box_state: ResMut<BrushBoxSelectState>,
     brush_caches: Query<&BrushMeshCache>,
     mut brushes: Query<&mut Brush>,
     mut drag_state: ResMut<VertexDragState>,
     modal: Option<Single<Entity, With<ActiveModalOperator>>>,
     mut halfedge_q: Query<&mut crate::brush::BrushHalfedge>,
     snap_settings: Res<SnapSettings>,
+    mut override_cursor: ResMut<OverrideCursor>,
 ) -> OperatorResult {
-    let brush_entity = brush_selection.entity?;
     let cursor_pos = vp.cursor()?;
     let (camera_entity, viewport_entity) = if modal.is_none() {
         let camera_entity = vp.camera_entity()?;
@@ -739,34 +843,26 @@ pub fn brush_vertex_drag(
     };
     let (camera, cam_tf) = vp.camera_for(camera_entity)?;
     let viewport_cursor = vp.viewport_cursor_for(camera, viewport_entity, cursor_pos)?;
-    let brush_global = brush_transforms.get(brush_entity)?;
 
     let shift = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
 
     if modal.is_none() {
-        // First invoke: pick vertex / split vertex.
-        let cache = brush_caches.get(brush_entity)?;
+        // First invoke: pick vertex / split vertex across all edit brushes.
+        let candidates: Vec<Entity> = brush_selection.edit_brushes().collect();
+        if candidates.is_empty() {
+            return OperatorResult::Cancelled;
+        }
 
         if shift && !ctrl {
-            // Shift+click: pick edge midpoint or face center to split.
-            let mut unique_edges: Vec<(usize, usize)> = Vec::new();
-            for polygon in &cache.face_polygons {
-                if polygon.len() < 2 {
-                    continue;
-                }
-                for i in 0..polygon.len() {
-                    let a = polygon[i];
-                    let b = polygon[(i + 1) % polygon.len()];
-                    let edge = (a.min(b), a.max(b));
-                    if !unique_edges.contains(&edge) {
-                        unique_edges.push(edge);
-                    }
-                }
-            }
+            // Shift+click: pick edge midpoint or face center to split (active brush only).
+            let brush_entity = brush_selection.active_brush?;
+            let cache = brush_caches.get(brush_entity)?;
+            let brush_global = brush_transforms.get(brush_entity)?;
+
             let mut best_split: Option<Vec3> = None;
             let mut best_dist = 20.0_f32;
-            for &(a, b) in &unique_edges {
+            for (a, b) in cache.unique_edges() {
                 let midpoint = (cache.vertices[a] + cache.vertices[b]) * 0.5;
                 if let Ok(screen) =
                     camera.world_to_viewport(cam_tf, brush_global.transform_point(midpoint))
@@ -799,7 +895,7 @@ pub fn brush_vertex_drag(
             }
             let split_pos = best_split?;
             let new_idx = cache.vertices.len();
-            brush_selection.vertices = vec![new_idx];
+            brush_selection.sub_mut(brush_entity).vertices = vec![new_idx];
             drag_state.split_vertex = Some(split_pos);
             drag_state.pending = Some(PendingSubDrag {
                 click_pos: cursor_pos,
@@ -807,33 +903,62 @@ pub fn brush_vertex_drag(
             return OperatorResult::Running;
         }
 
-        let mut best_vert = None;
+        // Plain or Ctrl+click: find the nearest vertex across all edit brushes.
+        let mut best: Option<(Entity, usize)> = None;
         let mut best_dist = 20.0_f32;
-        for (vi, v) in cache.vertices.iter().enumerate() {
-            if let Ok(screen) = camera.world_to_viewport(cam_tf, brush_global.transform_point(*v)) {
-                let dist = (screen - viewport_cursor).length();
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_vert = Some(vi);
+        for &brush_entity in &candidates {
+            let Ok(cache) = brush_caches.get(brush_entity) else {
+                continue;
+            };
+            let Ok(brush_global) = brush_transforms.get(brush_entity) else {
+                continue;
+            };
+            for (vi, v) in cache.vertices.iter().enumerate() {
+                if let Ok(screen) =
+                    camera.world_to_viewport(cam_tf, brush_global.transform_point(*v))
+                {
+                    let dist = (screen - viewport_cursor).length();
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best = Some((brush_entity, vi));
+                    }
                 }
             }
         }
-        let Some(vi) = best_vert else {
+        let Some((brush_entity, vi)) = best else {
+            // No vertex hit. Ctrl is additive-toggle, so an empty
+            // Ctrl-click is a no-op. Otherwise hand the press to the
+            // edit-mode box-select (Shift records an add-select); staying
+            // in edit mode either way.
             if !ctrl {
-                *edit_mode = EditMode::Object;
-                brush_selection.clear();
+                brush_box_state.pending = Some(cursor_pos);
+                brush_box_state.shift = shift;
             }
             return OperatorResult::Cancelled;
         };
+
+        brush_selection.active_brush = Some(brush_entity);
+
         if ctrl {
-            if let Some(pos) = brush_selection.vertices.iter().position(|&v| v == vi) {
-                brush_selection.vertices.remove(pos);
+            let sub = brush_selection.sub_mut(brush_entity);
+            if let Some(pos) = sub.vertices.iter().position(|&v| v == vi) {
+                sub.vertices.remove(pos);
             } else {
-                brush_selection.vertices.push(vi);
+                sub.vertices.push(vi);
             }
             return OperatorResult::Cancelled;
         }
-        brush_selection.vertices = vec![vi];
+
+        // Plain click on an already-selected vertex: keep the whole multi-brush
+        // selection and drag it as a group. Plain click on an unselected vertex:
+        // clear every brush's sub-selection and select just this one.
+        let already_selected = brush_selection
+            .sub(brush_entity)
+            .is_some_and(|s| s.vertices.contains(&vi));
+        if !already_selected {
+            brush_selection.clear_sub_selections();
+            brush_selection.sub_mut(brush_entity).vertices = vec![vi];
+        }
         drag_state.pending = Some(PendingSubDrag {
             click_pos: cursor_pos,
         });
@@ -841,6 +966,10 @@ pub fn brush_vertex_drag(
         drag_state.drag_viewport = Some(viewport_entity);
         return OperatorResult::Running;
     }
+
+    // Subsequent invokes need the active brush.
+    let brush_entity = brush_selection.active_brush?;
+    let brush_global = brush_transforms.get(brush_entity)?;
 
     // Subsequent invokes: constraint cycling, RMB cancel, release commit, drag math.
     if drag_state.active {
@@ -862,6 +991,7 @@ pub fn brush_vertex_drag(
 
     if mouse.just_released(MouseButton::Left) {
         clear_vertex_drag_state(&mut drag_state);
+        clear_grab_cursor(&mut override_cursor);
         return OperatorResult::Finished;
     }
 
@@ -880,134 +1010,81 @@ pub fn brush_vertex_drag(
         if let Some(split_pos) = drag_state.split_vertex {
             all_verts.push(split_pos);
         }
-        drag_state.start_vertex_positions = brush_selection
-            .vertices
+        let vertex_indices: Vec<usize> = brush_selection
+            .sub(brush_entity)
+            .map(|s| s.vertices.clone())
+            .unwrap_or_default();
+        drag_state.start_vertex_positions = vertex_indices
             .iter()
             .map(|&vi| all_verts.get(vi).copied().unwrap_or(Vec3::ZERO))
             .collect();
         drag_state.start_all_vertices = all_verts;
         drag_state.start_face_polygons = cache.face_polygons.clone();
+
+        // Capture every edit brush with selected vertices so one shared world
+        // offset moves them all.
+        let mut captures = capture_edit_brushes(
+            &brush_selection,
+            &brushes,
+            &brush_caches,
+            &brush_transforms,
+            |sub, _| sub.vertices.clone(),
+        );
+        // A Shift-split appends one vertex to the active brush only. The shared
+        // capture builds from the live cache, which does not contain that
+        // vertex, so re-derive the active brush's capture from the
+        // split-extended vertex list set above.
+        if drag_state.split_vertex.is_some()
+            && let Some(capture) = captures.iter_mut().find(|c| c.entity == brush_entity)
+        {
+            let extended = &drag_state.start_all_vertices;
+            capture.start_world = capture
+                .indices
+                .iter()
+                .map(|&vi| {
+                    let local = extended.get(vi).copied().unwrap_or(Vec3::ZERO);
+                    brush_global.transform_point(local)
+                })
+                .collect();
+            capture.start_all_vertices = extended.clone();
+        }
+        drag_state.brush_captures = captures;
+        set_grab_cursor(&mut override_cursor);
     }
 
     if drag_state.active {
-        let mut brush = brushes.get_mut(brush_entity)?;
-        let start = drag_state.start_brush.as_ref()?;
         let mouse_delta = viewport_cursor - drag_state.start_cursor;
-        let Some(local_offset) = compute_brush_drag_offset(
-            drag_state.constraint,
-            mouse_delta,
-            cam_tf,
-            camera,
-            brush_global,
-        ) else {
-            return OperatorResult::Running;
-        };
         let primary_start = drag_state
             .start_vertex_positions
             .first()
             .copied()
             .unwrap_or(Vec3::ZERO);
-        let local_offset = snap_drag_local_offset(
-            local_offset,
-            primary_start,
+        apply_shared_drag(
             drag_state.constraint,
+            mouse_delta,
+            primary_start,
+            cam_tf,
+            camera,
             brush_global,
             &snap_settings,
             ctrl,
+            &drag_state.brush_captures,
+            &mut brushes,
+            &mut halfedge_q,
         );
-
-        if let Ok(mut halfedge) = halfedge_q.get_mut(brush_entity) {
-            // HalfedgeMesh path: mutate vertex positions directly. Concave drags work.
-            let vert_keys = halfedge.vert_keys.clone();
-            for (sel_idx, &vert_idx) in brush_selection.vertices.iter().enumerate() {
-                if sel_idx < drag_state.start_vertex_positions.len() && vert_idx < vert_keys.len() {
-                    let new_pos = drag_state.start_vertex_positions[sel_idx] + local_offset;
-                    let key = vert_keys[vert_idx];
-                    if let Some(v) = halfedge.mesh.verts.get_mut(key) {
-                        v.co = new_pos;
-                    }
-                }
-            }
-            // Re-cache normals on every face (cheap for brush sizes).
-            let face_keys: Vec<_> = halfedge.mesh.faces.keys().collect();
-            for fk in face_keys {
-                let face = &halfedge.mesh.faces[fk];
-                let mut ring_positions = Vec::with_capacity(face.loop_count as usize);
-                let mut cur = face.loop_first;
-                for _ in 0..face.loop_count {
-                    let lp = &halfedge.mesh.loops[cur];
-                    ring_positions.push(halfedge.mesh.verts[lp.vert].co);
-                    cur = lp.next;
-                }
-                let new_normal = jackdaw_geometry::newell_normal(&ring_positions);
-                halfedge.mesh.faces[fk].normal_cache = new_normal;
-            }
-            // Sync the brush.faces[i].plane and flatten HalfedgeMesh into brush.topology.
-            let new_topology = halfedge.mesh.flatten_to_topology();
-            let positions: Vec<Vec3> = new_topology.vertices.iter().map(|v| v.position).collect();
-            for (face_idx, face_data) in brush.faces.iter_mut().enumerate() {
-                if face_idx < new_topology.polygons.len() {
-                    let normal = new_topology.face_normal_with(&positions, face_idx);
-                    let v0_idx = new_topology.loops
-                        [new_topology.polygons[face_idx].loop_start as usize]
-                        .vert as usize;
-                    let distance = positions[v0_idx].dot(normal);
-                    face_data.plane.normal = normal;
-                    face_data.plane.distance = distance;
-                }
-            }
-            brush.topology = new_topology;
-        } else {
-            // Legacy plane / Quickhull path. Used when HalfedgeMesh isn't present (e.g. Clip mode).
-            let mut new_verts = drag_state.start_all_vertices.clone();
-            for (sel_idx, &vert_idx) in brush_selection.vertices.iter().enumerate() {
-                if sel_idx < drag_state.start_vertex_positions.len() && vert_idx < new_verts.len() {
-                    new_verts[vert_idx] = drag_state.start_vertex_positions[sel_idx] + local_offset;
-                }
-            }
-            if let Some((new_brush, _)) = rebuild_brush_from_vertices(
-                start,
-                &drag_state.start_all_vertices,
-                &drag_state.start_face_polygons,
-                &new_verts,
-            ) {
-                *brush = new_brush;
-            }
-        }
     }
     OperatorResult::Running
 }
 
 fn cancel_vertex_drag(
-    brush_selection: Res<BrushSelection>,
     mut brushes: Query<&mut Brush>,
     mut halfedge_q: Query<&mut crate::brush::BrushHalfedge>,
     mut drag_state: ResMut<VertexDragState>,
+    mut override_cursor: ResMut<OverrideCursor>,
 ) {
-    if let Some(brush_entity) = brush_selection.entity
-        && let Some(ref start) = drag_state.start_brush
-        && let Ok(mut brush) = brushes.get_mut(brush_entity)
-    {
-        *brush = start.clone();
-        // If HalfedgeMesh was active, re-lift from the restored topology.
-        if let Ok(mut halfedge) = halfedge_q.get_mut(brush_entity) {
-            let mesh =
-                jackdaw_geometry::halfedge::HalfedgeMesh::lift_from_topology(&start.topology);
-            let vert_keys: Vec<_> = mesh.verts.keys().collect();
-            let mut face_keys: Vec<jackdaw_geometry::halfedge::FaceKey> =
-                vec![Default::default(); mesh.faces.len()];
-            for (k, f) in mesh.faces.iter() {
-                let slot = f.material_idx as usize;
-                if slot < face_keys.len() {
-                    face_keys[slot] = k;
-                }
-            }
-            halfedge.mesh = mesh;
-            halfedge.vert_keys = vert_keys;
-            halfedge.face_keys = face_keys;
-        }
-    }
+    restore_captures(&drag_state.brush_captures, &mut brushes, &mut halfedge_q);
     clear_vertex_drag_state(&mut drag_state);
+    clear_grab_cursor(&mut override_cursor);
 }
 
 fn clear_vertex_drag_state(drag_state: &mut VertexDragState) {
@@ -1016,6 +1093,7 @@ fn clear_vertex_drag_state(drag_state: &mut VertexDragState) {
     drag_state.constraint = VertexDragConstraint::Free;
     drag_state.split_vertex = None;
     drag_state.start_brush = None;
+    drag_state.brush_captures.clear();
     drag_state.drag_camera = None;
     drag_state.drag_viewport = None;
 }
@@ -1041,6 +1119,7 @@ pub(crate) fn edge_drag_invoke_trigger(
     drag_state: Res<EdgeDragState>,
     keybind_focus: KeybindFocus,
     vp: ViewportCursor,
+    gizmo_hover: Res<crate::gizmos::GizmoHoverState>,
     mut commands: Commands,
 ) {
     if !mouse.just_pressed(MouseButton::Left)
@@ -1049,6 +1128,9 @@ pub(crate) fn edge_drag_invoke_trigger(
         || drag_state.pending.is_some()
         || keybind_focus.is_typing()
         || vp.viewport_entity().is_none()
+        // A hovered gizmo axis owns the click; the sub-element gizmo drag
+        // takes it via `gizmo.drag_edit`.
+        || gizmo_hover.hovered_axis.is_some()
     {
         return;
     }
@@ -1074,20 +1156,20 @@ pub(crate) fn edge_drag_invoke_trigger(
 )]
 pub fn brush_edge_drag(
     _: In<OperatorParameters>,
-    mut edit_mode: ResMut<EditMode>,
     mouse: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     vp: ViewportCursor,
     brush_transforms: Query<&GlobalTransform>,
     mut brush_selection: ResMut<BrushSelection>,
+    mut brush_box_state: ResMut<BrushBoxSelectState>,
     brush_caches: Query<&BrushMeshCache>,
     mut brushes: Query<&mut Brush>,
     mut drag_state: ResMut<EdgeDragState>,
     modal: Option<Single<Entity, With<ActiveModalOperator>>>,
     mut halfedge_q: Query<&mut crate::brush::BrushHalfedge>,
     snap_settings: Res<SnapSettings>,
+    mut override_cursor: ResMut<OverrideCursor>,
 ) -> OperatorResult {
-    let brush_entity = brush_selection.entity?;
     let cursor_pos = vp.cursor()?;
     let (camera_entity, viewport_entity) = if modal.is_none() {
         let camera_entity = vp.camera_entity()?;
@@ -1105,62 +1187,78 @@ pub fn brush_edge_drag(
     };
     let (camera, cam_tf) = vp.camera_for(camera_entity)?;
     let viewport_cursor = vp.viewport_cursor_for(camera, viewport_entity, cursor_pos)?;
-    let brush_global = brush_transforms.get(brush_entity)?;
     let ctrl = keyboard.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = keyboard.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
 
     if modal.is_none() {
-        // First invoke: pick edge.
-        let cache = brush_caches.get(brush_entity)?;
+        // First invoke: pick the nearest edge across all edit brushes.
+        let candidates: Vec<Entity> = brush_selection.edit_brushes().collect();
+        if candidates.is_empty() {
+            return OperatorResult::Cancelled;
+        }
 
-        let mut unique_edges: Vec<(usize, usize)> = Vec::new();
-        for polygon in &cache.face_polygons {
-            if polygon.len() < 2 {
+        let mut best: Option<(Entity, (usize, usize))> = None;
+        let mut best_dist = 20.0_f32;
+
+        for &brush_entity in &candidates {
+            let Ok(cache) = brush_caches.get(brush_entity) else {
                 continue;
-            }
-            for i in 0..polygon.len() {
-                let a = polygon[i];
-                let b = polygon[(i + 1) % polygon.len()];
-                let edge = (a.min(b), a.max(b));
-                if !unique_edges.contains(&edge) {
-                    unique_edges.push(edge);
+            };
+            let Ok(brush_global) = brush_transforms.get(brush_entity) else {
+                continue;
+            };
+
+            for (a, b) in cache.unique_edges() {
+                let wa = brush_global.transform_point(cache.vertices[a]);
+                let wb = brush_global.transform_point(cache.vertices[b]);
+                let Ok(sa) = camera.world_to_viewport(cam_tf, wa) else {
+                    continue;
+                };
+                let Ok(sb) = camera.world_to_viewport(cam_tf, wb) else {
+                    continue;
+                };
+                let dist = point_to_segment_dist(viewport_cursor, sa, sb);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = Some((brush_entity, (a, b)));
                 }
             }
         }
 
-        let mut best_edge = None;
-        let mut best_dist = 20.0_f32;
-        for &(a, b) in &unique_edges {
-            let wa = brush_global.transform_point(cache.vertices[a]);
-            let wb = brush_global.transform_point(cache.vertices[b]);
-            let Ok(sa) = camera.world_to_viewport(cam_tf, wa) else {
-                continue;
-            };
-            let Ok(sb) = camera.world_to_viewport(cam_tf, wb) else {
-                continue;
-            };
-            let dist = point_to_segment_dist(viewport_cursor, sa, sb);
-            if dist < best_dist {
-                best_dist = dist;
-                best_edge = Some((a, b));
-            }
-        }
-
-        let Some(edge) = best_edge else {
+        let Some((brush_entity, edge)) = best else {
+            // No edge hit. Ctrl is additive-toggle, so an empty
+            // Ctrl-click is a no-op. Otherwise hand the press to the
+            // edit-mode box-select (Shift records an add-select); staying
+            // in edit mode either way.
             if !ctrl {
-                *edit_mode = EditMode::Object;
-                brush_selection.clear();
+                brush_box_state.pending = Some(cursor_pos);
+                brush_box_state.shift = shift;
             }
             return OperatorResult::Cancelled;
         };
+
+        brush_selection.active_brush = Some(brush_entity);
+
         if ctrl {
-            if let Some(pos) = brush_selection.edges.iter().position(|e| *e == edge) {
-                brush_selection.edges.remove(pos);
+            let sub = brush_selection.sub_mut(brush_entity);
+            if let Some(pos) = sub.edges.iter().position(|e| *e == edge) {
+                sub.edges.remove(pos);
             } else {
-                brush_selection.edges.push(edge);
+                sub.edges.push(edge);
             }
             return OperatorResult::Cancelled;
         }
-        brush_selection.edges = vec![edge];
+
+        // Plain click on an already-selected edge: keep the whole multi-brush
+        // selection and drag it as a group. Plain click on an unselected edge:
+        // clear every brush's sub-selection and select just this one.
+        let already_selected = brush_selection
+            .sub(brush_entity)
+            .is_some_and(|s| s.edges.contains(&edge));
+        if !already_selected {
+            brush_selection.clear_sub_selections();
+            brush_selection.sub_mut(brush_entity).edges = vec![edge];
+        }
         drag_state.pending = Some(PendingSubDrag {
             click_pos: cursor_pos,
         });
@@ -1168,6 +1266,10 @@ pub fn brush_edge_drag(
         drag_state.drag_viewport = Some(viewport_entity);
         return OperatorResult::Running;
     }
+
+    // Subsequent invokes need the active brush.
+    let brush_entity = brush_selection.active_brush?;
+    let brush_global = brush_transforms.get(brush_entity)?;
 
     if drag_state.active {
         if keyboard.just_pressed(KeyCode::KeyX) {
@@ -1188,6 +1290,7 @@ pub fn brush_edge_drag(
 
     if mouse.just_released(MouseButton::Left) {
         clear_edge_drag_state(&mut drag_state);
+        clear_grab_cursor(&mut override_cursor);
         return OperatorResult::Finished;
     }
 
@@ -1205,9 +1308,13 @@ pub fn brush_edge_drag(
         drag_state.start_all_vertices = cache.vertices.clone();
         drag_state.start_face_polygons = cache.face_polygons.clone();
 
+        let drag_edges: Vec<(usize, usize)> = brush_selection
+            .sub(brush_entity)
+            .map(|s| s.edges.clone())
+            .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         let mut edge_verts = Vec::new();
-        for &(a, b) in &brush_selection.edges {
+        for &(a, b) in &drag_edges {
             if seen.insert(a) {
                 edge_verts.push((a, cache.vertices.get(a).copied().unwrap_or(Vec3::ZERO)));
             }
@@ -1216,124 +1323,65 @@ pub fn brush_edge_drag(
             }
         }
         drag_state.start_edge_vertices = edge_verts;
+
+        // Capture every edit brush with selected edges so one shared world
+        // offset moves them all. `indices` are the deduped endpoint vertices of
+        // that brush's selected edges.
+        drag_state.brush_captures = capture_edit_brushes(
+            &brush_selection,
+            &brushes,
+            &brush_caches,
+            &brush_transforms,
+            |sub, _| {
+                let mut seen = std::collections::HashSet::new();
+                let mut indices = Vec::new();
+                for &(a, b) in &sub.edges {
+                    if seen.insert(a) {
+                        indices.push(a);
+                    }
+                    if seen.insert(b) {
+                        indices.push(b);
+                    }
+                }
+                indices
+            },
+        );
+        set_grab_cursor(&mut override_cursor);
     }
 
     if drag_state.active {
-        let mut brush = brushes.get_mut(brush_entity)?;
-        let start = drag_state.start_brush.as_ref()?;
         let mouse_delta = viewport_cursor - drag_state.start_cursor;
-        let Some(local_offset) = compute_brush_drag_offset(
-            drag_state.constraint,
-            mouse_delta,
-            cam_tf,
-            camera,
-            brush_global,
-        ) else {
-            return OperatorResult::Running;
-        };
         let primary_start = drag_state
             .start_edge_vertices
             .first()
             .map(|&(_, p)| p)
             .unwrap_or(Vec3::ZERO);
-        let local_offset = snap_drag_local_offset(
-            local_offset,
-            primary_start,
+        apply_shared_drag(
             drag_state.constraint,
+            mouse_delta,
+            primary_start,
+            cam_tf,
+            camera,
             brush_global,
             &snap_settings,
             ctrl,
+            &drag_state.brush_captures,
+            &mut brushes,
+            &mut halfedge_q,
         );
-        if let Ok(mut halfedge) = halfedge_q.get_mut(brush_entity) {
-            let vert_keys = halfedge.vert_keys.clone();
-            for &(vi, start_pos) in &drag_state.start_edge_vertices {
-                if vi < vert_keys.len() {
-                    let key = vert_keys[vi];
-                    if let Some(v) = halfedge.mesh.verts.get_mut(key) {
-                        v.co = start_pos + local_offset;
-                    }
-                }
-            }
-            // Recompute all face normals.
-            let face_keys: Vec<_> = halfedge.mesh.faces.keys().collect();
-            for fk in face_keys {
-                let face = &halfedge.mesh.faces[fk];
-                let mut ring_positions = Vec::with_capacity(face.loop_count as usize);
-                let mut cur = face.loop_first;
-                for _ in 0..face.loop_count {
-                    let lp = &halfedge.mesh.loops[cur];
-                    ring_positions.push(halfedge.mesh.verts[lp.vert].co);
-                    cur = lp.next;
-                }
-                let new_normal = jackdaw_geometry::newell_normal(&ring_positions);
-                halfedge.mesh.faces[fk].normal_cache = new_normal;
-            }
-            // Sync brush.faces[].plane and brush.topology from HalfedgeMesh.
-            let new_topology = halfedge.mesh.flatten_to_topology();
-            let positions: Vec<Vec3> = new_topology.vertices.iter().map(|v| v.position).collect();
-            for (face_idx, face_data) in brush.faces.iter_mut().enumerate() {
-                if face_idx < new_topology.polygons.len() {
-                    let normal = new_topology.face_normal_with(&positions, face_idx);
-                    let v0_idx = new_topology.loops
-                        [new_topology.polygons[face_idx].loop_start as usize]
-                        .vert as usize;
-                    let distance = positions[v0_idx].dot(normal);
-                    face_data.plane.normal = normal;
-                    face_data.plane.distance = distance;
-                }
-            }
-            brush.topology = new_topology;
-        } else {
-            // Legacy plane / Quickhull path.
-            let mut new_verts = drag_state.start_all_vertices.clone();
-            for &(vi, start_pos) in &drag_state.start_edge_vertices {
-                if vi < new_verts.len() {
-                    new_verts[vi] = start_pos + local_offset;
-                }
-            }
-            if let Some((new_brush, _)) = rebuild_brush_from_vertices(
-                start,
-                &drag_state.start_all_vertices,
-                &drag_state.start_face_polygons,
-                &new_verts,
-            ) {
-                *brush = new_brush;
-            }
-        }
     }
     OperatorResult::Running
 }
 
 fn cancel_edge_drag(
-    brush_selection: Res<BrushSelection>,
     mut brushes: Query<&mut Brush>,
     mut halfedge_q: Query<&mut crate::brush::BrushHalfedge>,
     mut drag_state: ResMut<EdgeDragState>,
+    mut override_cursor: ResMut<OverrideCursor>,
 ) {
-    if let Some(brush_entity) = brush_selection.entity
-        && let Some(ref start) = drag_state.start_brush
-        && let Ok(mut brush) = brushes.get_mut(brush_entity)
-    {
-        *brush = start.clone();
-        // If HalfedgeMesh was active, re-lift from the restored topology.
-        if let Ok(mut halfedge) = halfedge_q.get_mut(brush_entity) {
-            let mesh =
-                jackdaw_geometry::halfedge::HalfedgeMesh::lift_from_topology(&start.topology);
-            let vert_keys: Vec<_> = mesh.verts.keys().collect();
-            let mut face_keys: Vec<jackdaw_geometry::halfedge::FaceKey> =
-                vec![Default::default(); mesh.faces.len()];
-            for (k, f) in mesh.faces.iter() {
-                let slot = f.material_idx as usize;
-                if slot < face_keys.len() {
-                    face_keys[slot] = k;
-                }
-            }
-            halfedge.mesh = mesh;
-            halfedge.vert_keys = vert_keys;
-            halfedge.face_keys = face_keys;
-        }
-    }
+    restore_captures(&drag_state.brush_captures, &mut brushes, &mut halfedge_q);
     clear_edge_drag_state(&mut drag_state);
+    clear_grab_cursor(&mut override_cursor);
 }
 
 fn clear_edge_drag_state(drag_state: &mut EdgeDragState) {
@@ -1341,6 +1389,305 @@ fn clear_edge_drag_state(drag_state: &mut EdgeDragState) {
     drag_state.pending = None;
     drag_state.constraint = VertexDragConstraint::Free;
     drag_state.start_brush = None;
+    drag_state.brush_captures.clear();
     drag_state.drag_camera = None;
     drag_state.drag_viewport = None;
+}
+
+/// Build a [`BrushDragCapture`] for every edit brush whose sub-selection
+/// resolves to a non-empty set of topology vertex indices. `indices_of` maps a
+/// brush's sub-selection and face polygons to the vertex indices the drag
+/// should move (vertex drag: the selected vertices; edge drag: the deduped
+/// edge endpoints; gizmo: every selected sub-element vertex). Each capture's
+/// `start_world` is the world position of those vertices at drag start, taken
+/// from the live cache; callers that need a split-extended vertex list (the
+/// vertex drag) adjust the active brush's capture afterward.
+pub(crate) fn capture_edit_brushes(
+    brush_selection: &BrushSelection,
+    brushes: &Query<&mut Brush>,
+    caches: &Query<&BrushMeshCache>,
+    transforms: &Query<&GlobalTransform>,
+    indices_of: impl Fn(&BrushSubSelection, &[Vec<usize>]) -> Vec<usize>,
+) -> Vec<BrushDragCapture> {
+    let mut captures = Vec::new();
+    for e in brush_selection.edit_brushes() {
+        let Some(sub) = brush_selection.sub(e) else {
+            continue;
+        };
+        let Ok(e_cache) = caches.get(e) else {
+            continue;
+        };
+        let indices = indices_of(sub, &e_cache.face_polygons);
+        if indices.is_empty() {
+            continue;
+        }
+        let Ok(e_brush) = brushes.get(e) else {
+            continue;
+        };
+        let Ok(e_global) = transforms.get(e) else {
+            continue;
+        };
+        let start_world: Vec<Vec3> = indices
+            .iter()
+            .map(|&vi| {
+                let local = e_cache.vertices.get(vi).copied().unwrap_or(Vec3::ZERO);
+                e_global.transform_point(local)
+            })
+            .collect();
+        captures.push(BrushDragCapture {
+            entity: e,
+            start_brush: e_brush.clone(),
+            start_all_vertices: e_cache.vertices.clone(),
+            start_face_polygons: e_cache.face_polygons.clone(),
+            indices,
+            start_world,
+            start_world_to_local: e_global.affine().inverse(),
+        });
+    }
+    captures
+}
+
+/// Resolve the current mouse delta into a snapped world displacement and
+/// broadcast it to every captured brush. Shared by the vertex and edge drag
+/// per-frame tails, which differ only in how `primary_start` (the local start
+/// position the free-drag snap rounds against) is sourced. Does nothing when
+/// the offset cannot be projected this frame, matching the per-operator early
+/// return.
+fn apply_shared_drag(
+    constraint: VertexDragConstraint,
+    mouse_delta: Vec2,
+    primary_start: Vec3,
+    cam_tf: &GlobalTransform,
+    camera: &Camera,
+    brush_global: &GlobalTransform,
+    snap_settings: &SnapSettings,
+    ctrl: bool,
+    captures: &[BrushDragCapture],
+    brushes: &mut Query<&mut Brush>,
+    halfedge_q: &mut Query<&mut crate::brush::BrushHalfedge>,
+) {
+    let Some(local_offset) =
+        compute_brush_drag_offset(constraint, mouse_delta, cam_tf, camera, brush_global)
+    else {
+        return;
+    };
+    let local_offset = snap_drag_local_offset(
+        local_offset,
+        primary_start,
+        constraint,
+        brush_global,
+        snap_settings,
+        ctrl,
+    );
+    // The snapped offset is in the active brush's local space; lift it to a
+    // world displacement so every captured brush can re-express it in its own
+    // local space. `transform_vector3` applies rotation + scale only.
+    let world_offset = brush_global.affine().transform_vector3(local_offset);
+    broadcast_drag_to_captures(captures, world_offset, brushes, halfedge_q);
+}
+
+/// Move every captured brush's selected vertices by one shared world
+/// displacement. Each capture offsets its start world positions, converts the
+/// result back to its own local space via the inverse affine taken at drag
+/// start, and rebuilds through [`apply_vertex_deltas`].
+fn broadcast_drag_to_captures(
+    captures: &[BrushDragCapture],
+    world_offset: Vec3,
+    brushes: &mut Query<&mut Brush>,
+    halfedge_q: &mut Query<&mut crate::brush::BrushHalfedge>,
+) {
+    for capture in captures {
+        let new_positions: Vec<Vec3> = capture
+            .start_world
+            .iter()
+            .map(|&w| {
+                capture
+                    .start_world_to_local
+                    .transform_point3(w + world_offset)
+            })
+            .collect();
+        let Ok(mut brush) = brushes.get_mut(capture.entity) else {
+            continue;
+        };
+        let mut halfedge_opt = halfedge_q.get_mut(capture.entity).ok();
+        apply_vertex_deltas(
+            &mut brush,
+            halfedge_opt.as_deref_mut(),
+            &capture.start_brush,
+            &capture.start_all_vertices,
+            &capture.start_face_polygons,
+            &capture.indices,
+            &new_positions,
+        );
+    }
+}
+
+/// Restore every captured brush to its drag-start topology and re-lift its
+/// half-edge mesh. Shared by the vertex, edge, and edit-gizmo drag cancel
+/// handlers.
+pub(crate) fn restore_captures(
+    captures: &[BrushDragCapture],
+    brushes: &mut Query<&mut Brush>,
+    halfedge_q: &mut Query<&mut crate::brush::BrushHalfedge>,
+) {
+    for capture in captures {
+        let Ok(mut brush) = brushes.get_mut(capture.entity) else {
+            continue;
+        };
+        *brush = capture.start_brush.clone();
+        if let Ok(mut halfedge) = halfedge_q.get_mut(capture.entity) {
+            *halfedge = crate::brush::BrushHalfedge::from_topology(&capture.start_brush.topology);
+        }
+    }
+}
+
+// =====================================================================
+// Reusable vertex-delta application
+// =====================================================================
+
+/// Move a subset of brush vertices to new absolute brush-local positions and
+/// rebuild the geometry.
+///
+/// `indices[i]` is the topology vertex index (into `all_vertices` and, when
+/// present, `halfedge.vert_keys`) that should move. `new_positions[i]` is the
+/// absolute brush-local destination for that vertex.
+///
+/// Two code paths, matching the runtime behaviour in `brush_vertex_drag`:
+///
+/// - If `halfedge` is `Some`, the `HalfedgeMesh` path is taken: vertex
+///   coordinates are mutated directly, face normals are recomputed from the
+///   new ring positions, and the result is flattened back into
+///   `brush.topology` and `brush.faces[*].plane`.
+/// - If `halfedge` is `None`, the legacy Quickhull path is taken: a new
+///   vertex list is built from `all_vertices` with the selected positions
+///   overwritten, then `rebuild_brush_from_vertices` derives the convex hull.
+///   `start_brush`, `all_vertices`, and `face_polygons` are only read on this
+///   path; they may be empty slices when the `HalfedgeMesh` path is guaranteed.
+pub(crate) fn apply_vertex_deltas(
+    brush: &mut Brush,
+    halfedge: Option<&mut crate::brush::BrushHalfedge>,
+    start_brush: &Brush,
+    all_vertices: &[Vec3],
+    face_polygons: &[Vec<usize>],
+    indices: &[usize],
+    new_positions: &[Vec3],
+) {
+    if let Some(halfedge) = halfedge {
+        let vert_keys = halfedge.vert_keys.clone();
+        for (sel_idx, &vert_idx) in indices.iter().enumerate() {
+            if sel_idx < new_positions.len() && vert_idx < vert_keys.len() {
+                let key = vert_keys[vert_idx];
+                if let Some(v) = halfedge.mesh.verts.get_mut(key) {
+                    v.co = new_positions[sel_idx];
+                }
+            }
+        }
+        let face_keys: Vec<_> = halfedge.mesh.faces.keys().collect();
+        for fk in face_keys {
+            let face = &halfedge.mesh.faces[fk];
+            let mut ring_positions = Vec::with_capacity(face.loop_count as usize);
+            let mut cur = face.loop_first;
+            for _ in 0..face.loop_count {
+                let lp = &halfedge.mesh.loops[cur];
+                ring_positions.push(halfedge.mesh.verts[lp.vert].co);
+                cur = lp.next;
+            }
+            let new_normal = jackdaw_geometry::newell_normal(&ring_positions);
+            halfedge.mesh.faces[fk].normal_cache = new_normal;
+        }
+        let new_topology = halfedge.mesh.flatten_to_topology();
+        let positions: Vec<Vec3> = new_topology.vertices.iter().map(|v| v.position).collect();
+        for (face_idx, face_data) in brush.faces.iter_mut().enumerate() {
+            if face_idx < new_topology.polygons.len() {
+                let normal = new_topology.face_normal_with(&positions, face_idx);
+                let v0_idx = new_topology.loops[new_topology.polygons[face_idx].loop_start as usize]
+                    .vert as usize;
+                let distance = positions[v0_idx].dot(normal);
+                face_data.plane.normal = normal;
+                face_data.plane.distance = distance;
+            }
+        }
+        brush.topology = new_topology;
+    } else {
+        let mut new_verts = all_vertices.to_vec();
+        for (sel_idx, &vert_idx) in indices.iter().enumerate() {
+            if sel_idx < new_positions.len() && vert_idx < new_verts.len() {
+                new_verts[vert_idx] = new_positions[sel_idx];
+            }
+        }
+        if let Some((new_brush, _)) =
+            rebuild_brush_from_vertices(start_brush, all_vertices, face_polygons, &new_verts)
+        {
+            *brush = new_brush;
+        }
+    }
+}
+
+#[cfg(test)]
+mod apply_vertex_deltas_tests {
+    use super::*;
+    use jackdaw_geometry::halfedge::HalfedgeMesh;
+
+    fn make_halfedge(brush: &Brush) -> crate::brush::BrushHalfedge {
+        let mesh = HalfedgeMesh::lift_from_topology(&brush.topology);
+        let vert_keys: Vec<_> = mesh.verts.keys().collect();
+        let mut face_keys: Vec<jackdaw_geometry::halfedge::FaceKey> =
+            vec![Default::default(); mesh.faces.len()];
+        for (k, f) in mesh.faces.iter() {
+            let slot = f.material_idx as usize;
+            if slot < face_keys.len() {
+                face_keys[slot] = k;
+            }
+        }
+        crate::brush::BrushHalfedge {
+            mesh,
+            vert_keys,
+            face_keys,
+        }
+    }
+
+    #[test]
+    fn moving_a_vertex_lands_it_and_preserves_faces() {
+        let mut brush = Brush::cuboid(1.0, 1.0, 1.0);
+        let mut halfedge = make_halfedge(&brush);
+        let faces_before = brush.faces.len();
+
+        // Read vertex 0's current position from the topology.
+        let v0_before = brush.topology.vertices[0].position;
+        let delta = Vec3::new(0.5, 0.0, 0.0);
+        let new_pos = v0_before + delta;
+
+        let start_brush = brush.clone();
+        apply_vertex_deltas(
+            &mut brush,
+            Some(&mut halfedge),
+            &start_brush,
+            &[],
+            &[],
+            &[0],
+            &[new_pos],
+        );
+
+        // The moved vertex should appear somewhere in the refreshed topology.
+        let found = brush
+            .topology
+            .vertices
+            .iter()
+            .any(|v| (v.position - new_pos).length() < 1e-3);
+        assert!(
+            found,
+            "no vertex near {new_pos:?} after move; topology = {:?}",
+            brush
+                .topology
+                .vertices
+                .iter()
+                .map(|v| v.position)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            brush.faces.len(),
+            faces_before,
+            "face count should not change"
+        );
+    }
 }
