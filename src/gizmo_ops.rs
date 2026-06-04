@@ -1,7 +1,7 @@
 //! Gizmo space operator.
 //!
 //! `gizmo.space.toggle` flips world/local transform space.
-//! Default keybind: X.
+//! Default keybind: L.
 
 use bevy::prelude::*;
 use bevy_enhanced_input::prelude::{Press, *};
@@ -19,7 +19,7 @@ pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
         world.spawn((
             Action::<GizmoSpaceToggleOp>::new(),
             ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::KeyX, Press::default())],
+            bindings![(KeyCode::KeyL, Press::default())],
         ));
     });
 }
