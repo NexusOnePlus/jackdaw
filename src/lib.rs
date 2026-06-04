@@ -476,6 +476,27 @@ impl Plugin for ExtensionPlugin {
                 .register_extension::<builtin_extensions::InspectorExtension>();
         }
 
+        // Bundled behind the default-on `multiplayer` feature. Registers the
+        // proxy reflection types the networking authoring components need
+        // (`Replication`, `NetworkRoom`) plus the user-toggleable networking
+        // extension. No lightyear is compiled into the editor here. Kept a
+        // separate gated `if` so the cfg stays localized off the method chain
+        // above; `ExtensionAppExt` is already in scope from the `use` above.
+        #[cfg(feature = "multiplayer")]
+        if self.enable_builtin_extensiosn {
+            app.add_plugins(jackdaw_multiplayer::JackdawMultiplayerTypesPlugin)
+                .register_extension::<jackdaw_multiplayer_editor::MultiplayerExtension>();
+        }
+
+        // Bundled behind the default-on `camera_rig` feature: registers the
+        // authorable camera-rig component types (ThirdPersonCamera / FirstPersonCamera /
+        // CameraTarget) so they appear in the inspector's component picker under "Camera".
+        // No runtime camera systems run in the editor (only the types plugin is added).
+        #[cfg(feature = "camera_rig")]
+        if self.enable_builtin_extensiosn {
+            app.add_plugins(jackdaw_camera_rig::JackdawCameraRigTypesPlugin);
+        }
+
         for ctor in &self.user_extensions {
             let ctor = std::sync::Arc::clone(ctor);
             app.register_extension_with(move || (*ctor)());
