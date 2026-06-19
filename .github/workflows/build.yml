@@ -1,0 +1,20 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-05
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jackdaw-windows
+          path: target/release/jackdaw.exe
+          retention-days: 30
