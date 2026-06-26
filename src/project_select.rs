@@ -532,8 +532,8 @@ fn update_preflight_banner(
                 (
                     Text::new(String::from(Icon::RefreshCw.unicode())),
                     TextFont {
-                        font: ifont.clone(),
-                        font_size: tokens::FONT_SM,
+                        font: ifont.clone().into(),
+                        font_size: tokens::TEXT_SIZE_SM,
                         ..Default::default()
                     },
                     TextColor(tokens::TEXT_SECONDARY),
@@ -541,8 +541,8 @@ fn update_preflight_banner(
                 (
                     Text::new("Recheck"),
                     TextFont {
-                        font: font.clone(),
-                        font_size: tokens::FONT_SM,
+                        font: font.clone().into(),
+                        font_size: tokens::TEXT_SIZE_SM,
                         ..Default::default()
                     },
                     TextColor(tokens::TEXT_SECONDARY),
@@ -585,8 +585,8 @@ fn preflight_line(
             (
                 Text::new(String::from(icon.unicode())),
                 TextFont {
-                    font: icon_font.clone(),
-                    font_size: tokens::FONT_SM,
+                    font: icon_font.clone().into(),
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(icon_color),
@@ -594,8 +594,8 @@ fn preflight_line(
             (
                 Text::new(text),
                 TextFont {
-                    font: font.clone(),
-                    font_size: tokens::FONT_SM,
+                    font: font.clone().into(),
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(text_color),
@@ -615,8 +615,8 @@ fn preflight_fix_line(commands: &mut Commands, banner: Entity, font: &Handle<Fon
         children![(
             Text::new(text),
             TextFont {
-                font: font.clone(),
-                font_size: tokens::FONT_SM,
+                font: font.clone().into(),
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(tokens::TEXT_SECONDARY),
@@ -725,8 +725,8 @@ fn fill_project_selector(
                             (
                                 Text::new("jackdaw"),
                                 TextFont {
-                                    font: font.clone(),
-                                    font_size: tokens::FONT_MD,
+                                    font: font.clone().into(),
+                                    font_size: tokens::TEXT_SIZE,
                                     ..Default::default()
                                 },
                                 TextColor(tokens::TEXT_PRIMARY),
@@ -737,8 +737,8 @@ fn fill_project_selector(
                     (
                         Text::new(format!("v{}", env!("CARGO_PKG_VERSION"))),
                         TextFont {
-                            font: font.clone(),
-                            font_size: tokens::FONT_SM,
+                            font: font.clone().into(),
+                            font_size: tokens::TEXT_SIZE_SM,
                             ..Default::default()
                         },
                         TextColor(tokens::DOC_TAB_INACTIVE_LABEL),
@@ -844,8 +844,8 @@ fn fill_project_selector(
                         sidebar.spawn((
                             LocalizedText::new("source-checkout"),
                             TextFont {
-                                font: font.clone(),
-                                font_size: tokens::FONT_SM,
+                                font: font.clone().into(),
+                                font_size: tokens::TEXT_SIZE_SM,
                                 ..Default::default()
                             },
                             TextColor(tokens::DOC_TAB_INACTIVE_LABEL),
@@ -853,8 +853,8 @@ fn fill_project_selector(
                         sidebar.spawn((
                             Text::new(cwd.to_string_lossy().to_string()),
                             TextFont {
-                                font: font.clone(),
-                                font_size: tokens::FONT_XS,
+                                font: font.clone().into(),
+                                font_size: tokens::TEXT_SIZE_XS,
                                 ..Default::default()
                             },
                             TextColor(tokens::TEXT_SECONDARY),
@@ -899,8 +899,8 @@ fn fill_project_selector(
                             children![(
                                 Text::new("Projects"),
                                 TextFont {
-                                    font: font.clone(),
-                                    font_size: tokens::FONT_MD,
+                                    font: font.clone().into(),
+                                    font_size: tokens::TEXT_SIZE,
                                     ..Default::default()
                                 },
                                 TextColor(tokens::TEXT_PRIMARY),
@@ -1013,7 +1013,7 @@ fn spawn_project_row(
             children![(
                 Text::new(String::from(Icon::Folder.unicode())),
                 TextFont {
-                    font: icon_font.clone(),
+                    font: icon_font.clone().into(),
                     font_size: tokens::ICON_SM,
                     ..Default::default()
                 },
@@ -1046,8 +1046,8 @@ fn spawn_project_row(
                         (
                             Text::new(name.to_string()),
                             TextFont {
-                                font: font.clone(),
-                                font_size: tokens::FONT_MD,
+                                font: font.clone().into(),
+                                font_size: tokens::TEXT_SIZE,
                                 ..Default::default()
                             },
                             TextColor(tokens::TEXT_PRIMARY),
@@ -1058,8 +1058,8 @@ fn spawn_project_row(
                 (
                     Text::new(path_display.to_string()),
                     TextFont {
-                        font: font.clone(),
-                        font_size: tokens::FONT_SM,
+                        font: font.clone().into(),
+                        font_size: tokens::TEXT_SIZE_SM,
                         ..Default::default()
                     },
                     TextColor(tokens::TEXT_SECONDARY),
@@ -1128,8 +1128,8 @@ fn if_cwd_badge(is_cwd: bool, font: Handle<Font>) -> impl Bundle {
     (
         Text::new(text.to_string()),
         TextFont {
-            font,
-            font_size: tokens::FONT_SM,
+            font: font.into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_ACCENT),
@@ -1380,8 +1380,8 @@ fn spawn_launcher_section_label(
     parent.spawn((
         Text::new(label.to_string()),
         TextFont {
-            font,
-            font_size: tokens::FONT_SM,
+            font: font.into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::DOC_TAB_INACTIVE_LABEL),
@@ -1418,7 +1418,7 @@ fn spawn_empty_recent_state(
             (
                 Text::new(String::from(Icon::FolderOpen.unicode())),
                 TextFont {
-                    font: icon_font,
+                    font: icon_font.into(),
                     font_size: tokens::ICON_LG,
                     ..Default::default()
                 },
@@ -1427,8 +1427,8 @@ fn spawn_empty_recent_state(
             (
                 Text::new("No recent projects"),
                 TextFont {
-                    font,
-                    font_size: tokens::FONT_MD,
+                    font: font.into(),
+                    font_size: tokens::TEXT_SIZE,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_SECONDARY),
@@ -1468,7 +1468,7 @@ fn spawn_launcher_action_button(
                 (
                     Text::new(String::from(icon.unicode())),
                     TextFont {
-                        font: icon_font,
+                        font: icon_font.into(),
                         font_size: tokens::ICON_SM,
                         ..Default::default()
                     },
@@ -1477,8 +1477,8 @@ fn spawn_launcher_action_button(
                 (
                     Text::new(label.to_string()),
                     TextFont {
-                        font,
-                        font_size: tokens::FONT_MD,
+                        font: font.into(),
+                        font_size: tokens::TEXT_SIZE,
                         ..Default::default()
                     },
                     TextColor(tokens::TEXT_PRIMARY),
@@ -1582,8 +1582,8 @@ fn spawn_linkage_button(
             children![(
                 Text::new(label.to_string()),
                 TextFont {
-                    font,
-                    font_size: tokens::FONT_MD,
+                    font: font.into(),
+                    font_size: tokens::TEXT_SIZE,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -1693,7 +1693,8 @@ fn on_linkage_button_click(
 
 /// Push a new string into the Template URL text input.
 fn set_template_input_text(world: &mut World, new_text: String) {
-    use jackdaw_feathers::text_edit::{TextInputQueue, set_text_input_value};
+    use bevy::text::EditableText;
+    use jackdaw_feathers::text_edit::set_text_input_value;
 
     let mut q = world.query_filtered::<Entity, With<NewProjectTemplateInput>>();
     let Some(outer) = q.iter(world).next() else {
@@ -1702,13 +1703,13 @@ fn set_template_input_text(world: &mut World, new_text: String) {
     let Some((_wrapper, inner)) = find_text_edit_entities_for_template(world, outer) else {
         return;
     };
-    if let Some(mut queue) = world.get_mut::<TextInputQueue>(inner) {
-        set_text_input_value(&mut queue, new_text);
+    if let Some(mut editable) = world.get_mut::<EditableText>(inner) {
+        set_text_input_value(&mut editable, new_text);
     }
 }
 
 /// Walk from the outer Template-field entity to its inner
-/// `TextInputQueue`-bearing entity. Mirror of
+/// `EditableText` entity. Mirror of
 /// `inspector::find_text_edit_entities_local`.
 fn find_text_edit_entities_for_template(world: &World, outer: Entity) -> Option<(Entity, Entity)> {
     use jackdaw_feathers::text_edit::TextEditWrapper;
@@ -1803,8 +1804,8 @@ fn show_setup_jackdaw_card(world: &mut World, root: PathBuf, error: Option<Strin
     world.spawn((
         Text::new("Set up jackdaw for this project"),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_LG,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_LG,
             ..Default::default()
         },
         TextColor(tokens::TEXT_PRIMARY),
@@ -1819,8 +1820,8 @@ fn show_setup_jackdaw_card(world: &mut World, root: PathBuf, error: Option<Strin
              a `GamePlugin` stub is created for you.",
         ),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_SM,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -1831,8 +1832,8 @@ fn show_setup_jackdaw_card(world: &mut World, root: PathBuf, error: Option<Strin
         world.spawn((
             Text::new(format!("Could not set up: {error}")),
             TextFont {
-                font: font.clone(),
-                font_size: tokens::FONT_SM,
+                font: font.clone().into(),
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(Color::srgb(0.92, 0.45, 0.45)),
@@ -1903,8 +1904,8 @@ fn spawn_card_button(
             children![(
                 Text::new(label.to_string()),
                 TextFont {
-                    font: font.clone(),
-                    font_size: tokens::FONT_MD,
+                    font: font.clone().into(),
+                    font_size: tokens::TEXT_SIZE,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -1993,8 +1994,8 @@ fn show_lib_stub_warning_card_with_note(world: &mut World, root: PathBuf, note: 
     world.spawn((
         Text::new("Created a library for your game code"),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_LG,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_LG,
             ..Default::default()
         },
         TextColor(tokens::TEXT_PRIMARY),
@@ -2009,8 +2010,8 @@ fn show_lib_stub_warning_card_with_note(world: &mut World, root: PathBuf, note: 
              the editor opens but the inspector won't list your components.",
         ),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_SM,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(Color::srgb(0.95, 0.78, 0.45)),
@@ -2021,8 +2022,8 @@ fn show_lib_stub_warning_card_with_note(world: &mut World, root: PathBuf, note: 
         world.spawn((
             Text::new(note),
             TextFont {
-                font: font.clone(),
-                font_size: tokens::FONT_SM,
+                font: font.clone().into(),
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(Color::srgb(0.92, 0.45, 0.45)),
@@ -2145,8 +2146,8 @@ fn show_migration_preview_card(
     world.spawn((
         Text::new("Migrate your game code"),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_LG,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_LG,
             ..Default::default()
         },
         TextColor(tokens::TEXT_PRIMARY),
@@ -2155,8 +2156,8 @@ fn show_migration_preview_card(
     world.spawn((
         Text::new("Nothing is written until you click Apply. Your original main.rs is saved as main.rs.bak."),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_SM,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2183,8 +2184,8 @@ fn show_migration_preview_card(
     world.spawn((
         Text::new(summary),
         TextFont {
-            font: font.clone(),
-            font_size: tokens::FONT_SM,
+            font: font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_PRIMARY),
@@ -2285,8 +2286,8 @@ pub fn open_project_progress_modal(world: &mut World, project_name: &str) {
     world.spawn((
         Text::new(format!("Opening `{project_name}`")),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_LG,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_LG,
             ..Default::default()
         },
         TextColor(tokens::TEXT_PRIMARY),
@@ -2303,8 +2304,8 @@ pub fn open_project_progress_modal(world: &mut World, project_name: &str) {
              Subsequent opens are incremental and finish in seconds.",
         ),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2315,8 +2316,8 @@ pub fn open_project_progress_modal(world: &mut World, project_name: &str) {
         NewProjectStatusText,
         Text::new(String::new()),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2346,8 +2347,8 @@ pub fn open_project_progress_modal(world: &mut World, project_name: &str) {
         NewProjectProgressCrateLabel,
         LocalizedText::new("preparing-build"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2373,8 +2374,8 @@ pub fn open_project_progress_modal(world: &mut World, project_name: &str) {
         NewProjectLogText,
         Text::new(String::new()),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2501,7 +2502,7 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
             (
                 Text::new(String::from(heading_icon.unicode())),
                 TextFont {
-                    font: icon_font.clone(),
+                    font: icon_font.clone().into(),
                     font_size: tokens::ICON_MD,
                     ..Default::default()
                 },
@@ -2510,8 +2511,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
             (
                 Text::new(heading.to_string()),
                 TextFont {
-                    font: editor_font.clone(),
-                    font_size: tokens::FONT_XS,
+                    font: editor_font.clone().into(),
+                    font_size: tokens::TEXT_SIZE_XS,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -2524,8 +2525,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("Name"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2546,8 +2547,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("Location"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2568,8 +2569,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
         NewProjectLocationText,
         Text::new(location.to_string_lossy().into_owned()),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_MD,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE,
             ..Default::default()
         },
         TextColor(tokens::TEXT_PRIMARY),
@@ -2591,8 +2592,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
             children![(
                 Text::new("Browse..."),
                 TextFont {
-                    font: editor_font.clone(),
-                    font_size: tokens::FONT_SM,
+                    font: editor_font.clone().into(),
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -2610,8 +2611,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
         world.spawn((
             Text::new("Template type"),
             TextFont {
-                font: editor_font.clone(),
-                font_size: tokens::FONT_SM,
+                font: editor_font.clone().into(),
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(tokens::TEXT_SECONDARY),
@@ -2655,8 +2656,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
                  `dylib` feature.",
             ),
             TextFont {
-                font: editor_font.clone(),
-                font_size: tokens::FONT_SM,
+                font: editor_font.clone().into(),
+                font_size: tokens::TEXT_SIZE_SM,
                 ..default()
             },
             TextColor(tokens::TEXT_SECONDARY),
@@ -2699,8 +2700,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("Template"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2711,8 +2712,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("Local path"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2769,8 +2770,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
             children![(
                 Text::new("Browse..."),
                 TextFont {
-                    font: editor_font.clone(),
-                    font_size: tokens::FONT_SM,
+                    font: editor_font.clone().into(),
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -2786,8 +2787,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("Git URL"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2814,8 +2815,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("Branch"),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2846,8 +2847,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
     world.spawn((
         Text::new("If both are filled, the local path is used."),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2863,8 +2864,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
         NewProjectStatusText,
         Text::new(String::new()),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2879,7 +2880,7 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
         scrolling_log::ScrollingLogProps {
             margin: UiRect::top(Val::Px(8.0)),
             font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             text_color: tokens::TEXT_SECONDARY,
             background: tokens::PANEL_BG,
             auto_hide_when_empty: true,
@@ -2908,8 +2909,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
         NewProjectProgressCrateLabel,
         Text::new(String::new()),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2939,8 +2940,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
         NewProjectLogText,
         Text::new(String::new()),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_SECONDARY),
@@ -2979,8 +2980,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
                 NewProjectCancelButtonLabel,
                 Text::new("Back"),
                 TextFont {
-                    font: editor_font.clone(),
-                    font_size: tokens::FONT_MD,
+                    font: editor_font.clone().into(),
+                    font_size: tokens::TEXT_SIZE,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -3002,8 +3003,8 @@ pub fn open_new_project_modal(world: &mut World, preset: TemplatePreset) {
             children![(
                 Text::new("Create"),
                 TextFont {
-                    font: editor_font,
-                    font_size: tokens::FONT_MD,
+                    font: editor_font.into(),
+                    font_size: tokens::TEXT_SIZE,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -3069,8 +3070,8 @@ fn spawn_reset_location_button(
             children![(
                 Text::new("Reset"),
                 TextFont {
-                    font: editor_font.clone(),
-                    font_size: tokens::FONT_SM,
+                    font: editor_font.clone().into(),
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_SECONDARY),
@@ -3090,7 +3091,7 @@ fn on_reset_new_location(_: On<Pointer<Click>>, mut commands: Commands) {
 
 /// Observer for the Browse button on the local template path field.
 /// Opens a folder picker; on completion, writes the picked path into
-/// the `NewProjectLocalTemplateInput` text field via `TextInputQueue`.
+/// the `NewProjectLocalTemplateInput` text field via `EditableText`.
 fn on_browse_template_folder(
     _: On<Pointer<Click>>,
     mut commands: Commands,
@@ -3118,7 +3119,8 @@ fn on_browse_template_folder(
 
 /// Push a new string into the local template path text input.
 fn set_local_template_input_text(world: &mut World, new_text: String) {
-    use jackdaw_feathers::text_edit::{TextInputQueue, set_text_input_value};
+    use bevy::text::EditableText;
+    use jackdaw_feathers::text_edit::set_text_input_value;
 
     let mut q = world.query_filtered::<Entity, With<NewProjectLocalTemplateInput>>();
     let Some(outer) = q.iter(world).next() else {
@@ -3127,8 +3129,8 @@ fn set_local_template_input_text(world: &mut World, new_text: String) {
     let Some((_wrapper, inner)) = find_text_edit_entities_for_template(world, outer) else {
         return;
     };
-    if let Some(mut queue) = world.get_mut::<TextInputQueue>(inner) {
-        set_text_input_value(&mut queue, new_text);
+    if let Some(mut editable) = world.get_mut::<EditableText>(inner) {
+        set_text_input_value(&mut editable, new_text);
     }
 }
 

@@ -17,10 +17,10 @@ pub fn headless_app() -> App {
     app.add_plugins(
         DefaultPlugins
             .set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(WgpuSettings {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                     backends: None,
                     ..default()
-                }),
+                })),
                 ..default()
             })
             .disable::<WinitPlugin>(),
@@ -35,6 +35,14 @@ pub fn headless_app() -> App {
         bevy_enhanced_input::prelude::EnhancedInputPlugin,
     ))
     .add_plugins(EditorPlugins::default());
+    // Bevy 0.19's component-sync hooks (`On<Remove, SyncToRenderWorld>`) read the
+    // main-world `PendingSyncEntity` resource that `SyncWorldPlugin` installs.
+    // The headless `RenderPlugin` (no backend) never spins up the render world,
+    // so that plugin isn't pulled in here; add it explicitly so despawning a
+    // sync-component entity (e.g. through `scene.new`) doesn't panic.
+    if !app.is_plugin_added::<bevy::render::sync_world::SyncWorldPlugin>() {
+        app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+    }
     app
 }
 
