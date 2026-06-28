@@ -1,17 +1,18 @@
 //! View-mode toggles and per-viewport view operators.
 //!
 //! - Toggle ops (`view.toggle_*`, `view.cycle_*`) flip a resource.
-//!   Only `view.toggle_wireframe` has a default keybind
-//!   (`Ctrl+Shift+W`); the rest are menu-only.
+//!   Only `view.toggle_wireframe` (`Ctrl+Shift+W`) and
+//!   `view.toggle_x_ray` (`Alt+Z`) have default keybinds; the rest are
+//!   menu-only.
 //! - Per-viewport ops (`view.set_axis`, `view.toggle_persp_ortho`,
 //!   `view.frame_selected`, `view.frame_all`) act on the camera of
 //!   the hovered viewport (via [`crate::viewport::ActiveViewport`])
 //!   so quad-view / stacked viewport setups respond to whichever
 //!   panel the cursor is in.
 
-use bevy::prelude::*;
-use bevy_enhanced_input::prelude::{Press, *};
+use bevy::{dev_tools::infinite_grid::InfiniteGrid, prelude::*};
 use jackdaw_api::prelude::*;
+use jackdaw_api_internal::keymap::PresetInput;
 
 use crate::core_extension::CoreExtensionInputContext;
 use crate::selection::{Selected, Selection};
@@ -19,6 +20,7 @@ use crate::viewport::{ActiveViewport, MainViewportCamera, ViewportGrid};
 
 pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
     ctx.register_operator::<ViewToggleWireframeOp>()
+        .register_operator::<ViewToggleXrayOp>()
         .register_operator::<ViewToggleBoundingBoxesOp>()
         .register_operator::<ViewCycleBoundingBoxModeOp>()
         .register_operator::<ViewToggleFaceGridOp>()
@@ -35,68 +37,32 @@ pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
         .register_operator::<ViewUiZoomOutOp>()
         .register_operator::<ViewUiZoomResetOp>();
 
-    let ext = ctx.id();
-    ctx.entity_mut().world_scope(|world| {
-        world.spawn((
-            Action::<ViewToggleWireframeOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(
-                KeyCode::KeyW.with_mod_keys(ModKeys::CONTROL | ModKeys::SHIFT),
-                Press::default(),
-            )],
-        ));
-        world.spawn((
-            Action::<ViewTogglePerspOrthoOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::Numpad5, Press::default())],
-        ));
-        world.spawn((
-            Action::<ViewFrameSelectedOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::NumpadDecimal, Press::default())],
-        ));
-        world.spawn((
-            Action::<ViewFrameAllOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::Home, Press::default())],
-        ));
-        world.spawn((
-            Action::<ViewUiZoomInOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![
-                (
-                    KeyCode::Equal.with_mod_keys(ModKeys::CONTROL),
-                    Press::default(),
-                ),
-                (
-                    KeyCode::NumpadAdd.with_mod_keys(ModKeys::CONTROL),
-                    Press::default(),
-                ),
-            ],
-        ));
-        world.spawn((
-            Action::<ViewUiZoomOutOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![
-                (
-                    KeyCode::Minus.with_mod_keys(ModKeys::CONTROL),
-                    Press::default(),
-                ),
-                (
-                    KeyCode::NumpadSubtract.with_mod_keys(ModKeys::CONTROL),
-                    Press::default(),
-                ),
-            ],
-        ));
-        world.spawn((
-            Action::<ViewUiZoomResetOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(
-                KeyCode::Digit0.with_mod_keys(ModKeys::CONTROL),
-                Press::default(),
-            )],
-        ));
-    });
+    ctx.bind_operator::<CoreExtensionInputContext, ViewToggleWireframeOp>([PresetInput::key(
+        "KeyW",
+    )
+    .ctrl()
+    .shift()]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewToggleXrayOp>([
+        PresetInput::key("KeyZ").alt()
+    ]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewTogglePerspOrthoOp>([PresetInput::key(
+        "Numpad5",
+    )]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewFrameSelectedOp>([PresetInput::key(
+        "NumpadDecimal",
+    )]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewFrameAllOp>([PresetInput::key("Home")]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewUiZoomInOp>([
+        PresetInput::key("Equal").ctrl(),
+        PresetInput::key("NumpadAdd").ctrl(),
+    ]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewUiZoomOutOp>([
+        PresetInput::key("Minus").ctrl(),
+        PresetInput::key("NumpadSubtract").ctrl(),
+    ]);
+    ctx.bind_operator::<CoreExtensionInputContext, ViewUiZoomResetOp>([
+        PresetInput::key("Digit0").ctrl()
+    ]);
 }
 
 #[operator(id = "view.toggle_wireframe", label = "Toggle Wireframe")]
@@ -105,6 +71,15 @@ pub(crate) fn view_toggle_wireframe(
     mut settings: ResMut<crate::view_modes::ViewModeSettings>,
 ) -> OperatorResult {
     settings.wireframe = !settings.wireframe;
+    OperatorResult::Finished
+}
+
+#[operator(id = "view.toggle_x_ray", label = "Toggle X-Ray")]
+pub(crate) fn view_toggle_xray(
+    _: In<OperatorParameters>,
+    mut settings: ResMut<crate::view_modes::ViewModeSettings>,
+) -> OperatorResult {
+    settings.x_ray = !settings.x_ray;
     OperatorResult::Finished
 }
 
@@ -298,13 +273,7 @@ pub(crate) fn view_set_axis(
         (&mut Transform, &mut Projection, Option<&ViewportGrid>),
         With<MainViewportCamera>,
     >,
-    mut grids: Query<
-        &mut Transform,
-        (
-            With<bevy_infinite_grid::InfiniteGrid>,
-            Without<MainViewportCamera>,
-        ),
-    >,
+    mut grids: Query<&mut Transform, (With<InfiniteGrid>, Without<MainViewportCamera>)>,
 ) -> OperatorResult {
     let axis = read_int_param(&params, "axis").unwrap_or(1);
     let sign_int = read_int_param(&params, "sign").unwrap_or(1);
@@ -343,9 +312,8 @@ pub(crate) fn view_set_axis(
     OperatorResult::Finished
 }
 
-/// Quaternion that orients an infinite-grid entity so its plane faces
-/// the camera looking down the given world axis. The grid's local plane
-/// is XZ; we map it onto:
+/// Orient a viewport grid so its plane faces the camera for axis-aligned ortho views.
+///
 /// - axis 0 (X, side view): YZ plane
 /// - axis 1 (Y, top view): XZ plane (no rotation)
 /// - axis 2 (Z, front view): XY plane
@@ -369,13 +337,7 @@ pub(crate) fn view_toggle_persp_ortho(
     _: In<OperatorParameters>,
     active: Res<ActiveViewport>,
     mut cameras: Query<(&mut Projection, Option<&ViewportGrid>), With<MainViewportCamera>>,
-    mut grids: Query<
-        &mut Transform,
-        (
-            With<bevy_infinite_grid::InfiniteGrid>,
-            Without<MainViewportCamera>,
-        ),
-    >,
+    mut grids: Query<&mut Transform, (With<InfiniteGrid>, Without<MainViewportCamera>)>,
 ) -> OperatorResult {
     let camera_entity = active.camera?;
     let (mut projection, grid_link) = cameras.get_mut(camera_entity)?;
@@ -484,7 +446,7 @@ pub(crate) fn axis_view_keys(
     input_focus: Res<bevy::input_focus::InputFocus>,
     mut commands: Commands,
 ) {
-    if modal.active.is_some() || input_focus.0.is_some() {
+    if modal.active.is_some() || input_focus.get().is_some() {
         return;
     }
 

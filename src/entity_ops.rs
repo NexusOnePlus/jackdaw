@@ -32,6 +32,14 @@ impl Default for SystemClipboard {
     }
 }
 
+impl SystemClipboard {
+    /// The OS clipboard image as owned RGBA8, or an error when the clipboard
+    /// holds no image. Mirrors how the paste path reaches the inner clipboard.
+    pub(crate) fn get_image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
+        self.clipboard.get_image()
+    }
+}
+
 // Re-export from jackdaw_jsn
 pub use jackdaw_jsn::GltfSource;
 
@@ -204,7 +212,7 @@ pub fn create_entity(
                 Name::new("Point Light"),
                 SceneLight,
                 PointLight {
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     ..default()
                 },
                 Transform::from_xyz(0.0, 3.0, 0.0),
@@ -215,7 +223,7 @@ pub fn create_entity(
                 Name::new("Directional Light"),
                 SceneLight,
                 DirectionalLight {
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     ..default()
                 },
                 Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.4, 0.0)),
@@ -226,7 +234,7 @@ pub fn create_entity(
                 Name::new("Spot Light"),
                 SceneLight,
                 SpotLight {
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     ..default()
                 },
                 Transform::from_xyz(0.0, 3.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -374,7 +382,9 @@ pub fn create_entity_in_world(world: &mut World, template: EntityTemplate) {
     let label = format!("Add {}", template.label());
     let spawn_fn = Box::new(move |world: &mut World| -> Entity {
         let mut system_state: SystemState<(Commands, ResMut<Selection>)> = SystemState::new(world);
-        let (mut commands, mut selection) = system_state.get_mut(world);
+        let Ok((mut commands, mut selection)) = system_state.get_mut(world) else {
+            return Entity::PLACEHOLDER;
+        };
         let entity = create_entity(&mut commands, template, &mut selection);
         system_state.apply(world);
         crate::scene_io::register_entity_in_ast(world, entity);
@@ -411,7 +421,7 @@ pub fn spawn_gltf(
                 path: path.to_string(),
                 scene_index,
             },
-            SceneRoot(scene),
+            WorldAssetRoot(scene),
             Transform::from_translation(position),
         ))
         .id();
@@ -422,7 +432,9 @@ pub fn spawn_gltf(
 pub fn spawn_gltf_in_world(world: &mut World, path: &str, position: Vec3) {
     let mut system_state: SystemState<(Commands, Res<AssetServer>, ResMut<Selection>)> =
         SystemState::new(world);
-    let (mut commands, asset_server, mut selection) = system_state.get_mut(world);
+    let Ok((mut commands, asset_server, mut selection)) = system_state.get_mut(world) else {
+        return;
+    };
     spawn_gltf(&mut commands, &asset_server, path, position, &mut selection);
     system_state.apply(world);
 }
@@ -498,23 +510,42 @@ pub fn duplicate_selected(world: &mut World) {
             continue;
         }
 
-        // Snapshot the entity (and descendants) via DynamicSceneBuilder. The raw builder
-        // copies `Children`, which preserves real child entities (e.g. a tree's trunk
-        // brush). It also copies the brush's runtime mesh-face child refs, which
-        // DynamicScene remaps to dead placeholder entities; those dangling refs are harmless
-        // because every scene walk (`collect_entity_ids`, the serialize walk) skips
-        // despawned entities, and `Children` is never serialized. Denying `Children` here
-        // instead drops the real children, so the raw builder is correct.
+        // Snapshot the entity (and descendants) via DynamicSceneBuilder.
+        // `collect_entity_ids` keeps real children (e.g. a tree's trunk brush)
+        // but excludes runtime face-mesh children. The brush's `Children`
+        // component still references those excluded meshes, and `write_to_world`
+        // allocates a live placeholder entity for each unmapped reference, which
+        // would otherwise surface as empty orphan children on the clone. We
+        // despawn those placeholders below; the clone's brush regenerates its
+        // own face meshes on the next remesh.
         let mut snapshot_entities = Vec::new();
         crate::commands::collect_entity_ids(world, entity, &mut snapshot_entities);
-        let scene = DynamicSceneBuilder::from_world(world)
+        let snapshot_set: std::collections::HashSet<Entity> =
+            snapshot_entities.iter().copied().collect();
+        let type_registry = world.resource::<AppTypeRegistry>().read();
+        let scene = DynamicWorldBuilder::from_world(world, &type_registry)
             .extract_entities(snapshot_entities.into_iter())
             .build();
+        drop(type_registry);
 
         // Write the snapshot back to create a clone
         let mut entity_map = Default::default();
         if scene.write_to_world(world, &mut entity_map).is_err() {
             continue;
+        }
+
+        // Despawn placeholder clones created for child references that were not
+        // part of the snapshot (the brush's runtime face meshes), so the clone
+        // does not gain empty orphan children.
+        let placeholders: Vec<Entity> = entity_map
+            .iter()
+            .filter(|(src, _)| !snapshot_set.contains(src))
+            .map(|(_, dst)| *dst)
+            .collect();
+        for placeholder in placeholders {
+            if let Ok(ec) = world.get_entity_mut(placeholder) {
+                ec.despawn();
+            }
         }
 
         // Find the cloned root entity
@@ -979,6 +1010,10 @@ fn remap_stable_ids(
 
 /// Paste entities from system clipboard JSN text.
 fn paste_components(world: &mut World) {
+    if crate::asset_ingest::paste_clipboard_image(world) {
+        return;
+    }
+
     let jsn_text = {
         let Some(mut cb) = world.get_resource_mut::<SystemClipboard>() else {
             return;
@@ -1131,8 +1166,10 @@ fn unhide_all_entities(world: &mut World, scene_entities: &mut SystemState<Scene
 
     // Only unhide top-level scene entities (with Name), matching hide_unselected logic.
     let hidden: Vec<Entity> = {
-        scene_entities
-            .get(world)
+        let Ok(entities) = scene_entities.get(world) else {
+            return;
+        };
+        entities
             .iter()
             .filter(|(_, vis)| **vis == Visibility::Hidden)
             .map(|(e, _)| e)
@@ -1167,8 +1204,10 @@ fn hide_all_entities(world: &mut World, scene_entities: &mut SystemState<SceneEn
 
     // Hide all top-level scene entities (same filter as H, applied to everything).
     let to_hide: Vec<(Entity, Visibility)> = {
-        scene_entities
-            .get(world)
+        let Ok(entities) = scene_entities.get(world) else {
+            return;
+        };
+        entities
             .iter()
             .filter(|(_, vis)| **vis != Visibility::Hidden)
             .map(|(e, vis)| (e, *vis))
@@ -1257,8 +1296,8 @@ fn get_assets_base_dir() -> Option<std::path::PathBuf> {
 // operator has the scene locked, matching the guards the legacy
 // `handle_entity_keys` applied.
 
-use bevy_enhanced_input::prelude::{Press, *};
 use jackdaw_api::prelude::*;
+use jackdaw_api_internal::keymap::PresetInput;
 
 use crate::core_extension::CoreExtensionInputContext;
 
@@ -1279,6 +1318,7 @@ pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
     #[cfg(feature = "camera_rig")]
     ctx.register_operator::<EntityAddCameraRigOp>();
     ctx.register_operator::<EntityAddEmptyOp>()
+        .register_operator::<EntityAddImageOp>()
         .register_operator::<EntityAddNavmeshOp>()
         .register_operator::<EntityAddTerrainOp>()
         .register_operator::<EntityAddPrefabOp>()
@@ -1297,56 +1337,28 @@ pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
         .register_operator::<EntityAddZoneTransitionOp>()
         .register_operator::<EntityAddNetworkRoomOp>();
 
-    let ext = ctx.id();
-    ctx.entity_mut().world_scope(|world| {
-        world.spawn((
-            Action::<EntityDeleteOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::Delete, Press::default())],
-        ));
-        world.spawn((
-            Action::<EntityDuplicateOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(
-                KeyCode::KeyD.with_mod_keys(ModKeys::CONTROL),
-                Press::default(),
-            )],
-        ));
-        world.spawn((
-            Action::<EntityCopyComponentsOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(
-                KeyCode::KeyC.with_mod_keys(ModKeys::CONTROL),
-                Press::default(),
-            )],
-        ));
-        world.spawn((
-            Action::<EntityPasteComponentsOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(
-                KeyCode::KeyV.with_mod_keys(ModKeys::CONTROL),
-                Press::default(),
-            )],
-        ));
-        world.spawn((
-            Action::<EntityToggleVisibilityOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::KeyH, Press::default())],
-        ));
-        world.spawn((
-            Action::<EntityUnhideAllOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(
-                KeyCode::KeyH.with_mod_keys(ModKeys::CONTROL),
-                Press::default(),
-            )],
-        ));
-        world.spawn((
-            Action::<EntityHideUnselectedOp>::new(),
-            ActionOf::<CoreExtensionInputContext>::new(ext),
-            bindings![(KeyCode::KeyH.with_mod_keys(ModKeys::ALT), Press::default(),)],
-        ));
-    });
+    ctx.bind_operator::<CoreExtensionInputContext, EntityDeleteOp>([PresetInput::key("Delete")]);
+    ctx.bind_operator::<CoreExtensionInputContext, EntityDuplicateOp>([
+        PresetInput::key("KeyD").ctrl()
+    ]);
+    ctx.bind_operator::<CoreExtensionInputContext, EntityCopyComponentsOp>([PresetInput::key(
+        "KeyC",
+    )
+    .ctrl()]);
+    ctx.bind_operator::<CoreExtensionInputContext, EntityPasteComponentsOp>([PresetInput::key(
+        "KeyV",
+    )
+    .ctrl()]);
+    ctx.bind_operator::<CoreExtensionInputContext, EntityToggleVisibilityOp>([PresetInput::key(
+        "KeyH",
+    )]);
+    ctx.bind_operator::<CoreExtensionInputContext, EntityUnhideAllOp>([
+        PresetInput::key("KeyH").ctrl()
+    ]);
+    ctx.bind_operator::<CoreExtensionInputContext, EntityHideUnselectedOp>([PresetInput::key(
+        "KeyH",
+    )
+    .alt()]);
 }
 
 /// Shared availability check for entity manipulation operators.
@@ -1361,7 +1373,7 @@ fn can_act_on_entities(
     draw_state: Res<crate::draw_brush::DrawBrushState>,
     edit_mode: Res<crate::brush::EditMode>,
 ) -> bool {
-    if input_focus.0.is_some() || active.is_modal_running() || modal.active.is_some() {
+    if input_focus.get().is_some() || active.is_modal_running() || modal.active.is_some() {
         return false;
     }
     if draw_state.active.is_some() {
@@ -1549,6 +1561,12 @@ pub(crate) fn entity_add_camera_rig(
     OperatorResult::Finished
 }
 
+#[operator(id = "entity.add.image", label = "Image")]
+pub fn entity_add_image(_: In<OperatorParameters>, mut commands: Commands) -> OperatorResult {
+    commands.queue(crate::reference_image::open_reference_image_picker);
+    OperatorResult::Finished
+}
+
 #[operator(id = "entity.add.empty", label = "Empty")]
 pub(crate) fn entity_add_empty(
     _: In<OperatorParameters>,
@@ -1654,7 +1672,10 @@ pub(crate) fn entity_add_reflection_probe(
         crate::spawn_undoable(world, "Add Reflection Probe", |world| {
             let mut system_state: SystemState<(Commands, Res<AssetServer>, ResMut<Selection>)> =
                 SystemState::new(world);
-            let (mut commands, asset_server, mut selection) = system_state.get_mut(world);
+            let Ok((mut commands, asset_server, mut selection)) = system_state.get_mut(world)
+            else {
+                return Entity::PLACEHOLDER;
+            };
             // Reuse the editor's shipped environment-map cubemaps as the
             // probe's reflection source, the same embedded asset the
             // viewport and material preview load.
@@ -1669,7 +1690,7 @@ pub(crate) fn entity_add_reflection_probe(
             let entity = commands
                 .spawn((
                     Name::new("Reflection Probe"),
-                    LightProbe,
+                    LightProbe::default(),
                     EnvironmentMapLight {
                         diffuse_map,
                         specular_map,
@@ -1699,7 +1720,9 @@ pub(crate) fn entity_add_navmesh(
         crate::spawn_undoable(world, "Add Navmesh Region", |world| {
             let mut system_state: SystemState<(Commands, ResMut<Selection>)> =
                 SystemState::new(world);
-            let (mut commands, mut selection) = system_state.get_mut(world);
+            let Ok((mut commands, mut selection)) = system_state.get_mut(world) else {
+                return Entity::PLACEHOLDER;
+            };
             let entity = crate::navmesh::spawn_navmesh_entity(&mut commands);
             selection.select_single(&mut commands, entity);
             system_state.apply(world);
@@ -1720,7 +1743,9 @@ pub(crate) fn entity_add_spawn_point(
         crate::spawn_undoable(world, "Add Spawn Point", |world| {
             let mut system_state: SystemState<(Commands, ResMut<Selection>)> =
                 SystemState::new(world);
-            let (mut commands, mut selection) = system_state.get_mut(world);
+            let Ok((mut commands, mut selection)) = system_state.get_mut(world) else {
+                return Entity::PLACEHOLDER;
+            };
             let entity = commands
                 .spawn((
                     Name::new("Spawn Point"),
@@ -1748,7 +1773,9 @@ pub(crate) fn entity_add_zone_transition(
         crate::spawn_undoable(world, "Add Zone Transition", |world| {
             let mut system_state: SystemState<(Commands, ResMut<Selection>)> =
                 SystemState::new(world);
-            let (mut commands, mut selection) = system_state.get_mut(world);
+            let Ok((mut commands, mut selection)) = system_state.get_mut(world) else {
+                return Entity::PLACEHOLDER;
+            };
             let entity = commands
                 .spawn((
                     Name::new("Zone Transition"),
@@ -1779,7 +1806,9 @@ pub(crate) fn entity_add_network_room(
         crate::spawn_undoable(world, "Add Network Room", |world| {
             let mut system_state: SystemState<(Commands, ResMut<Selection>)> =
                 SystemState::new(world);
-            let (mut commands, mut selection) = system_state.get_mut(world);
+            let Ok((mut commands, mut selection)) = system_state.get_mut(world) else {
+                return Entity::PLACEHOLDER;
+            };
             let entity = commands
                 .spawn((
                     Name::new("Network Room"),
@@ -1806,7 +1835,9 @@ pub(crate) fn entity_add_terrain(
         crate::spawn_undoable(world, "Add Terrain", |world| {
             let mut system_state: SystemState<(Commands, ResMut<Selection>)> =
                 SystemState::new(world);
-            let (mut commands, mut selection) = system_state.get_mut(world);
+            let Ok((mut commands, mut selection)) = system_state.get_mut(world) else {
+                return Entity::PLACEHOLDER;
+            };
             let entity = crate::terrain::spawn_terrain_entity(&mut commands);
             selection.select_single(&mut commands, entity);
             system_state.apply(world);

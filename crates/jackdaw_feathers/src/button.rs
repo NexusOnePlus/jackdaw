@@ -1,3 +1,4 @@
+use bevy::feathers::cursor::EntityCursor;
 use bevy::input_focus::InputFocus;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
@@ -7,11 +8,9 @@ use std::borrow::Cow;
 
 use crate::icons::EditorFont;
 use crate::tokens::{
-    BORDER_RADIUS_MD, PRIMARY_COLOR, TEXT_BODY_COLOR, TEXT_DISPLAY_COLOR, TEXT_MUTED_COLOR,
-    TEXT_SIZE, TEXT_SIZE_SM,
+    BORDER_RADIUS_MD, DESTRUCTIVE_RED, DESTRUCTIVE_RED_HOVER, PRIMARY_COLOR, TEXT_BODY_COLOR,
+    TEXT_DISPLAY_COLOR, TEXT_MUTED_COLOR, TEXT_SIZE, TEXT_SIZE_SM,
 };
-
-use crate::cursor::HoverCursor;
 
 #[derive(EntityEvent)]
 pub struct ButtonClickEvent {
@@ -133,6 +132,7 @@ pub enum ButtonVariant {
     Primary,
     Destructive,
     Ghost,
+    Close,
     Active,
     ActiveAlt,
     Disabled,
@@ -159,9 +159,16 @@ impl ButtonVariant {
             Self::Active => Srgba::new(0.314, 0.314, 0.314, 1.0),
             Self::Destructive => {
                 if hovered {
-                    tailwind::RED_600
+                    DESTRUCTIVE_RED_HOVER
                 } else {
-                    tailwind::RED_500
+                    DESTRUCTIVE_RED
+                }
+            }
+            Self::Close => {
+                if hovered {
+                    DESTRUCTIVE_RED_HOVER
+                } else {
+                    TEXT_BODY_COLOR
                 }
             }
         }
@@ -172,6 +179,13 @@ impl ButtonVariant {
             Self::Ghost => {
                 if hovered {
                     0.05
+                } else {
+                    0.0
+                }
+            }
+            Self::Close => {
+                if hovered {
+                    0.5
                 } else {
                     0.0
                 }
@@ -198,7 +212,7 @@ impl ButtonVariant {
     }
     pub fn text_color(&self) -> Srgba {
         match self {
-            Self::Default | Self::Ghost | Self::ActiveAlt => TEXT_BODY_COLOR,
+            Self::Default | Self::Ghost | Self::Close | Self::ActiveAlt => TEXT_BODY_COLOR,
             Self::Primary | Self::Destructive | Self::Active => TEXT_DISPLAY_COLOR,
             Self::Disabled => TEXT_MUTED_COLOR,
         }
@@ -206,9 +220,9 @@ impl ButtonVariant {
     pub fn border_color(&self) -> Srgba {
         use bevy::color::palettes::tailwind;
         match self {
-            Self::Default | Self::Ghost | Self::Disabled => tailwind::ZINC_700,
+            Self::Default | Self::Ghost | Self::Close | Self::Disabled => tailwind::ZINC_700,
             Self::Primary | Self::Active => PRIMARY_COLOR,
-            Self::Destructive => tailwind::RED_500,
+            Self::Destructive => DESTRUCTIVE_RED,
             Self::ActiveAlt => TEXT_BODY_COLOR,
         }
     }
@@ -220,7 +234,7 @@ impl ButtonVariant {
     }
     pub fn border_opacity(&self, hovered: bool) -> f32 {
         match self {
-            Self::Ghost => {
+            Self::Ghost | Self::Close => {
                 if hovered {
                     1.0
                 } else {
@@ -260,10 +274,10 @@ impl ButtonSize {
             Self::Icon | Self::IconSM => px(0.0),
         }
     }
-    pub fn icon_size(&self) -> f32 {
+    pub fn icon_size(&self) -> FontSize {
         match self {
-            Self::IconSM => 14.0,
-            Self::Icon | Self::MD => 16.0,
+            Self::IconSM => FontSize::Px(14.0),
+            Self::Icon | Self::MD => FontSize::Px(16.0),
         }
     }
 }
@@ -398,7 +412,7 @@ pub(crate) fn button_base(
         variant,
         size,
         Hovered::default(),
-        HoverCursor(bevy::window::SystemCursorIcon::Pointer),
+        EntityCursor::System(bevy::window::SystemCursorIcon::Pointer),
         Node {
             width: if align_left {
                 percent(100)
@@ -546,7 +560,7 @@ fn setup_button(
                     parent.spawn((
                         Text::new(icon.unicode()),
                         TextFont {
-                            font: icon_font_handle.clone(),
+                            font: icon_font_handle.clone().into(),
                             font_size: size.icon_size(),
                             ..default()
                         },
@@ -565,7 +579,7 @@ fn setup_button(
                         ButtonContentText,
                         Text::new(&content),
                         TextFont {
-                            font: font.clone(),
+                            font: font.clone().into(),
                             font_size: TEXT_SIZE,
                             weight: FontWeight::MEDIUM,
                             ..default()
@@ -582,7 +596,7 @@ fn setup_button(
                     parent.spawn((
                         Text::new(subtitle),
                         TextFont {
-                            font: font.clone(),
+                            font: font.clone().into(),
                             font_size: TEXT_SIZE_SM,
                             ..default()
                         },
@@ -598,7 +612,7 @@ fn setup_button(
                     parent.spawn((
                         Text::new(icon.unicode()),
                         TextFont {
-                            font: icon_font_handle.clone(),
+                            font: icon_font_handle.clone().into(),
                             font_size: size.icon_size(),
                             ..default()
                         },
@@ -636,7 +650,7 @@ fn handle_hover(
             continue;
         };
 
-        let is_hovered = hovered.get() || focus.0 == Some(entity);
+        let is_hovered = hovered.get() || focus.get() == Some(entity);
         bg.0 = variant
             .bg_color(is_hovered)
             .with_alpha(variant.bg_opacity(is_hovered))
@@ -698,7 +712,7 @@ pub fn icon_button(props: IconButtonProps, icon_font: &Handle<Font>) -> impl Bun
         children![(
             Text::new(icon.unicode()),
             TextFont {
-                font: icon_font.clone(),
+                font: icon_font.clone().into(),
                 font_size: size.icon_size(),
                 ..default()
             },

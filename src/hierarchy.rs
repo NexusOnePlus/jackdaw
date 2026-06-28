@@ -1,10 +1,15 @@
 use std::collections::HashSet;
 
-use bevy::{input_focus::InputFocus, prelude::*, ui::ui_transform::UiGlobalTransform};
+use bevy::{
+    input_focus::{FocusCause, InputFocus},
+    prelude::*,
+    ui::ui_transform::UiGlobalTransform,
+};
 use bevy_enhanced_input::prelude::{Press, *};
 use bevy_monitors::prelude::{Mutation, NotifyChanged};
 use jackdaw_api::prelude::*;
 use jackdaw_api_internal::entity_icons::{EntityIconRegistry, registered_icon};
+use jackdaw_api_internal::keymap::PresetInput;
 use jackdaw_feathers::{
     context_menu::spawn_context_menu,
     icons::IconFont,
@@ -15,9 +20,9 @@ use jackdaw_feathers::{
 use jackdaw_widgets::context_menu::{ContextMenuAction, ContextMenuState};
 use jackdaw_widgets::tree_view::{
     EntityCategory, TreeChildrenPopulated, TreeFocused, TreeIndex, TreeNode, TreeNodeExpanded,
-    TreeRowChildren, TreeRowClicked, TreeRowContent, TreeRowDropped, TreeRowDroppedOnRoot,
-    TreeRowInlineRename, TreeRowLabel, TreeRowRenamed, TreeRowSelected, TreeRowStartRename,
-    TreeRowVisibilityToggled,
+    TreeRowChildren, TreeRowClicked, TreeRowContent, TreeRowDot, TreeRowDropped,
+    TreeRowDroppedOnRoot, TreeRowInlineRename, TreeRowLabel, TreeRowRenamed, TreeRowSelected,
+    TreeRowStartRename, TreeRowVisibilityToggle, TreeRowVisibilityToggled,
 };
 
 use crate::{
@@ -28,7 +33,7 @@ use crate::{
     selection::{Selected, Selection},
 };
 use jackdaw_feathers::dialog::{DialogActionEvent, DialogChildrenSlot};
-use jackdaw_jsn::BrushGroup;
+use jackdaw_jsn::{Brush, BrushGroup};
 
 /// Stores the default name for the prefab save dialog.
 #[derive(Resource, Default)]
@@ -129,6 +134,7 @@ impl Plugin for HierarchyPlugin {
             .add_observer(on_tree_row_clicked)
             .add_observer(on_entity_removed)
             .add_observer(on_name_changed)
+            .add_observer(on_brush_icon_ready)
             .add_observer(on_entity_selected)
             .add_observer(on_entity_deselected)
             .add_observer(on_tree_row_dropped)
@@ -169,7 +175,7 @@ fn classify_entity(world: &World, entity: Entity) -> EntityCategory {
     if world.get::<jackdaw_jsn::SceneRootTag>(entity).is_some() {
         return EntityCategory::Scene;
     }
-    if world.get::<SceneRoot>(entity).is_some() {
+    if world.get::<WorldAssetRoot>(entity).is_some() {
         return EntityCategory::Scene;
     }
     // An entity with no type of its own but with children reads as a grouping
@@ -238,12 +244,17 @@ fn child_visible_in_mode(
     }
 }
 
-/// Whether a child entity should appear in the outliner. Editor-only entities,
-/// hidden entities, and the face meshes the editor re-derives from a `Brush`
-/// (a brush is one row, not a row plus a child per generated face) are all
-/// excluded.
+/// Whether a child entity should appear in the outliner. A `Children` list can
+/// still name a despawned entity (duplicating a brush copies its `Children`, and
+/// the scene mapper rewrites the runtime mesh-chunk refs to dead entity ids), so
+/// dead entities are rejected first: `world.get::<Marker>` returns `None` for a
+/// dead entity just as it does for a live one lacking the marker, which would
+/// otherwise let a dead ref pass as a real child. Editor-only entities, hidden
+/// entities, and the face meshes the editor re-derives from a `Brush` (a brush
+/// is one row, not a row plus a child per generated face) are also excluded.
 fn is_outliner_child(world: &World, child: Entity) -> bool {
-    world.get::<EditorEntity>(child).is_none()
+    world.get_entity(child).is_ok()
+        && world.get::<EditorEntity>(child).is_none()
         && world.get::<EditorHidden>(child).is_none()
         && world.get::<jackdaw_jsn::DerivedFaceMesh>(child).is_none()
 }
@@ -671,6 +682,16 @@ fn on_name_changed(
     child_of_check: Query<(), With<ChildOf>>,
 ) {
     let entity = trigger.event_target();
+
+    // The row icon is registered against the entity's type component (Brush,
+    // Terrain, light, ...), which can stream in before the row exists, leaving
+    // the fallback dot. `Name` usually lands last, so refresh the glyph here for
+    // any registered type (a no-op when no row exists yet; the later spawn then
+    // reads the resolved icon). Generalizes `on_brush_icon_ready`.
+    commands.queue(move |world: &mut World| {
+        refresh_row_icon(world, entity);
+    });
+
     let Ok(name) = name_query.get(entity) else {
         return;
     };
@@ -772,6 +793,59 @@ fn on_name_mutated(
             }
         }
     }
+}
+
+/// First child of `parent` that carries component `C`.
+fn first_child_with<C: Component>(world: &World, parent: Entity) -> Option<Entity> {
+    let children: Vec<Entity> = world.get::<Children>(parent)?.iter().collect();
+    children
+        .into_iter()
+        .find(|&child| world.get::<C>(child).is_some())
+}
+
+/// Re-derive the icon glyph for every Outliner row of `entity`. A brush's icon
+/// is registered against its `Brush` component (`registered_icon`); the
+/// duplicate path streams a brush's components into the world one at a time
+/// through the scene, so the row can be spawned (when `Transform` lands) before
+/// `Brush` arrives, leaving the fallback dot. Refreshing the glyph here mirrors
+/// how the label refreshes on a `Name` change. Only the glyph changes: a brush
+/// root's category (and so its icon color) does not depend on `Brush`.
+fn refresh_row_icon(world: &mut World, entity: Entity) {
+    let Some(icon) = registered_icon(world, entity) else {
+        return;
+    };
+    let glyph = String::from(icon.unicode());
+    let rows: Vec<Entity> = world
+        .resource::<TreeIndex>()
+        .rows_for_source(entity)
+        .map(|(_container, row)| row)
+        .collect();
+    for row in rows {
+        // TreeNode -> TreeRowContent -> TreeRowDot -> glyph Text.
+        let Some(content) = first_child_with::<TreeRowContent>(world, row) else {
+            continue;
+        };
+        let Some(dot) = first_child_with::<TreeRowDot>(world, content) else {
+            continue;
+        };
+        let Some(glyph_text) = world.get::<Children>(dot).and_then(|c| c.iter().next()) else {
+            continue;
+        };
+        if let Some(mut text) = world.get_mut::<Text>(glyph_text) {
+            text.0 = glyph.clone();
+        }
+    }
+}
+
+/// A brush's outliner row icon is registered against its `Brush` component, but
+/// the duplicate path writes a brush's components into the world incrementally
+/// through the scene, so the row can be created before `Brush` lands and shows
+/// the generic dot. Re-derive the glyph once `Brush` is present.
+fn on_brush_icon_ready(trigger: On<Add, Brush>, mut commands: Commands) {
+    let entity = trigger.event_target();
+    commands.queue(move |world: &mut World| {
+        refresh_row_icon(world, entity);
+    });
 }
 
 /// When an entity gets a parent (`ChildOf` added or changed),
@@ -1645,7 +1719,10 @@ fn add_child_entity(
     });
 }
 
-/// Toggle entity visibility when the eye icon is clicked.
+/// Toggle entity visibility when the eye icon is clicked. This is an
+/// editor-local view state: it sets ECS `Visibility` only and is never written
+/// to the `.jsn` scene, so it does not re-apply on rebuild. The eye glyph is
+/// synced to match so hidden state is always visible.
 fn on_visibility_toggled(
     event: On<TreeRowVisibilityToggled>,
     mut commands: Commands,
@@ -1662,25 +1739,45 @@ fn on_visibility_toggled(
         Visibility::Hidden => Visibility::Inherited,
         _ => Visibility::Hidden,
     };
-
-    let old_json = serde_json::Value::String(format!("{current:?}"));
-    let new_json = serde_json::Value::String(format!("{new_visibility:?}"));
-
-    let cmd = SetJsnField {
-        entity: source,
-        type_path: "bevy_camera::visibility::Visibility".to_string(),
-        field_path: String::new(),
-        old_value: old_json,
-        new_value: new_json,
-        was_derived: false,
-    };
+    let hidden = matches!(new_visibility, Visibility::Hidden);
 
     commands.queue(move |world: &mut World| {
-        let mut cmd = Box::new(cmd);
-        cmd.execute(world);
-        let mut history = world.resource_mut::<CommandHistory>();
-        history.push_executed(cmd);
+        if let Ok(mut ec) = world.get_entity_mut(source) {
+            ec.insert(new_visibility);
+        }
+        refresh_row_visibility_glyph(world, source, hidden);
     });
+}
+
+/// Sync the eye toggle glyph for every Outliner row of `entity` to its
+/// visibility state, dimming when hidden so the state always reads correctly.
+fn refresh_row_visibility_glyph(world: &mut World, entity: Entity, hidden: bool) {
+    use jackdaw_feathers::icons::Icon;
+    let glyph = String::from(if hidden { Icon::EyeOff } else { Icon::Eye }.unicode());
+    let alpha = if hidden { 0.7 } else { 0.4 };
+    let rows: Vec<Entity> = world
+        .resource::<TreeIndex>()
+        .rows_for_source(entity)
+        .map(|(_container, row)| row)
+        .collect();
+    for row in rows {
+        // TreeNode -> TreeRowContent -> TreeRowVisibilityToggle -> glyph Text.
+        let Some(content) = first_child_with::<TreeRowContent>(world, row) else {
+            continue;
+        };
+        let Some(toggle) = first_child_with::<TreeRowVisibilityToggle>(world, content) else {
+            continue;
+        };
+        let Some(glyph_text) = world.get::<Children>(toggle).and_then(|c| c.iter().next()) else {
+            continue;
+        };
+        if let Some(mut text) = world.get_mut::<Text>(glyph_text) {
+            text.0 = glyph.clone();
+        }
+        if let Some(mut color) = world.get_mut::<TextColor>(glyph_text) {
+            color.0 = color.0.with_alpha(alpha);
+        }
+    }
 }
 
 pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
@@ -1701,16 +1798,15 @@ pub(crate) fn add_to_extension(ctx: &mut ExtensionContext) {
         .register_operator::<crate::prefab::operators::PrefabUnbundleInstanceOp>()
         .register_operator::<crate::prefab::operators::PrefabRepairSelfCyclesOp>();
     let ext = ctx.id();
+    // Deferred: condition is not bare Press::default() (mouse button + Press).
     ctx.spawn((
         Action::<HierarchyOpenContextMenuOp>::new(),
         ActionOf::<crate::core_extension::CoreExtensionInputContext>::new(ext),
         bindings![(MouseButton::Right, Press::default())],
     ));
-    ctx.spawn((
-        Action::<RenameBeginOp>::new(),
-        ActionOf::<crate::core_extension::CoreExtensionInputContext>::new(ext),
-        bindings![(KeyCode::F2, Press::default())],
-    ));
+    ctx.bind_operator::<crate::core_extension::CoreExtensionInputContext, RenameBeginOp>([
+        PresetInput::key("F2"),
+    ]);
 }
 
 /// Marker for inline rename `text_edit` entity, linking back to the label entity and source entity.
@@ -1792,7 +1888,9 @@ struct RestoreLabel {
 }
 
 impl Command for RestoreLabel {
-    fn apply(self, world: &mut World) {
+    type Out = ();
+
+    fn apply(self, world: &mut World) -> Self::Out {
         let Ok(mut ec) = world.get_entity_mut(self.label_entity) else {
             return;
         };
@@ -1902,8 +2000,8 @@ fn auto_focus_inline_rename(
             if let Ok(wrapper_kids) = wrapper_children.get(child) {
                 for wk in wrapper_kids.iter() {
                     if editor_text_edits.contains(wk) {
-                        if input_focus.0 != Some(wk) {
-                            input_focus.0 = Some(wk);
+                        if input_focus.get() != Some(wk) {
+                            input_focus.set(wk, FocusCause::Pressed);
                         }
                         return;
                     }
@@ -2362,6 +2460,66 @@ mod tests {
         let ephemeral_host = world.spawn_empty().id();
         world.spawn((ChildOf(ephemeral_host), crate::pie_projection::PieEphemeral));
         assert!(!has_visible_children(&world, ephemeral_host));
+    }
+
+    #[test]
+    fn dead_child_refs_are_not_outliner_children() {
+        // A `Children` list can still name a despawned entity: duplicating a
+        // brush copies its `Children`, and the scene mapper rewrites the runtime
+        // mesh-chunk refs to dead entity ids. A dead ref must not surface as a
+        // phantom outliner row, which made the clone read as a parent folder and
+        // spawned a TreeNode pointing at a nonexistent entity.
+        let mut world = World::new();
+        let ghost = world.spawn_empty().id();
+        // A live, unmarked entity is a normal outliner child.
+        assert!(is_outliner_child(&world, ghost));
+        // Once despawned, the lingering id must be rejected.
+        world.despawn(ghost);
+        assert!(!is_outliner_child(&world, ghost));
+    }
+
+    #[test]
+    fn brush_icon_refreshes_when_brush_added_after_row() {
+        // The duplicate path streams a brush's components into the world one at
+        // a time through the scene, so its outliner row can be spawned (on
+        // Transform) before `Brush` lands, leaving the fallback dot. Once
+        // `Brush` is present, refresh_row_icon must swap the glyph to the
+        // registered brush icon.
+        use jackdaw_feathers::icons::Icon;
+
+        let mut world = World::new();
+        world.init_resource::<AppTypeRegistry>();
+        {
+            let registry = world.resource::<AppTypeRegistry>();
+            registry.write().register::<Brush>();
+        }
+
+        let mut icons = EntityIconRegistry::default();
+        icons.register(Brush::type_path(), Icon::Cuboid);
+        world.insert_resource(icons);
+
+        let source = world.spawn(Brush::default()).id();
+
+        // Minimal row: TreeNode -> TreeRowContent -> TreeRowDot -> glyph Text.
+        let glyph = world.spawn(Text::new("x")).id();
+        let dot = world.spawn(TreeRowDot).id();
+        world.entity_mut(glyph).insert(ChildOf(dot));
+        let content = world.spawn(TreeRowContent).id();
+        world.entity_mut(dot).insert(ChildOf(content));
+        let row = world.spawn(TreeNode(source)).id();
+        world.entity_mut(content).insert(ChildOf(row));
+
+        let container = world.spawn_empty().id();
+        let mut index = TreeIndex::default();
+        index.insert(container, source, row);
+        world.insert_resource(index);
+
+        refresh_row_icon(&mut world, source);
+
+        assert_eq!(
+            world.get::<Text>(glyph).map(|t| t.0.clone()),
+            Some(String::from(Icon::Cuboid.unicode()))
+        );
     }
 
     #[test]

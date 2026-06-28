@@ -5,10 +5,10 @@ pub mod collapsible;
 pub mod color_picker;
 pub mod combobox;
 pub mod context_menu;
-pub mod cursor;
 pub mod dialog;
 pub mod file_browser;
 pub mod icons;
+pub mod inspector_card;
 pub mod inspector_field;
 pub mod list_view;
 pub mod menu_bar;
@@ -36,13 +36,10 @@ pub struct EditorFeathersPlugin;
 
 impl Plugin for EditorFeathersPlugin {
     fn build(&self, app: &mut bevy::app::App) {
-        // text_edit::plugin adds TextInputPlugin which adds InputDispatchPlugin,
-        // so we must not add InputDispatchPlugin ourselves.
         app.add_plugins((
             jackdaw_widgets::EditorWidgetsPlugins,
             split_panel::SplitPanelPlugin,
             icons::IconFontPlugin,
-            cursor::plugin,
             button::plugin,
             checkbox::plugin,
             popover::plugin,

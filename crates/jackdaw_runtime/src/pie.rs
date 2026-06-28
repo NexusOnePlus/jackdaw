@@ -73,7 +73,7 @@ pub fn attach_pie(app: &mut App, transport: IpcChannelTransport) {
     app.insert_resource(crate::pie_frames::spawn_frame_sender_thread(
         transport.lane_sender(jackdaw_pie_protocol::PieChannel::Frames),
     ));
-    app.insert_non_send_resource(PieTransportRes(transport));
+    app.insert_non_send(PieTransportRes(transport));
     app.init_resource::<PieStreamState>();
     app.init_resource::<HighlightedEntity>();
     // Drain control in PreUpdate, before input processing so forwarded editor
@@ -188,7 +188,7 @@ fn stream_state(world: &mut World) {
             }
         }
 
-        let transport = &mut world.non_send_resource_mut::<PieTransportRes>().0;
+        let transport = &mut world.non_send_mut::<PieTransportRes>().0;
         for bytes in &spawn_frames {
             transport.send(PieChannel::Reliable, bytes);
         }
@@ -253,7 +253,7 @@ fn stream_state(world: &mut World) {
         }
     }
 
-    let transport = &mut world.non_send_resource_mut::<PieTransportRes>().0;
+    let transport = &mut world.non_send_mut::<PieTransportRes>().0;
     for bytes in &spawn_frames {
         transport.send(PieChannel::Reliable, bytes);
     }
@@ -291,7 +291,7 @@ fn apply_control(world: &mut World) {
     }
 
     let frames: Vec<Vec<u8>> = world
-        .non_send_resource_mut::<PieTransportRes>()
+        .non_send_mut::<PieTransportRes>()
         .0
         .drain_received()
         .into_iter()
@@ -341,7 +341,7 @@ fn apply_control(world: &mut World) {
                 let reply = StateEvent::PickResult { entity };
                 if let Ok(bytes) = to_bytes(&reply) {
                     world
-                        .non_send_resource_mut::<PieTransportRes>()
+                        .non_send_mut::<PieTransportRes>()
                         .0
                         .send(PieChannel::Reliable, &bytes);
                 }
@@ -562,11 +562,22 @@ fn apply_input(world: &mut World, event: jackdaw_pie_protocol::PieInputEvent) {
             } else {
                 MouseScrollUnit::Pixel
             };
-            world.write_message(MouseWheel { unit, x, y, window });
+            world.write_message(MouseWheel {
+                unit,
+                x,
+                y,
+                window,
+                phase: bevy::input::touch::TouchPhase::Moved,
+            });
             write_pointer(
                 world,
                 window,
-                bevy::picking::pointer::PointerAction::Scroll { unit, x, y },
+                bevy::picking::pointer::PointerAction::Scroll {
+                    unit,
+                    x,
+                    y,
+                    phase: bevy::input::touch::TouchPhase::Moved,
+                },
             );
         }
         PieInputEvent::FocusGained => {
@@ -1108,10 +1119,10 @@ mod tests {
 
     #[test]
     fn pick_replies_with_the_nearest_transform_hit() {
+        use bevy::ecs::entity::EntityHashMap;
         use bevy::picking::backend::HitData;
         use bevy::picking::hover::HoverMap;
         use bevy::picking::pointer::PointerId;
-        use bevy::platform::collections::HashMap;
 
         let mut world = World::new();
         let camera = world.spawn_empty().id();
@@ -1126,8 +1137,9 @@ mod tests {
             depth,
             position: None,
             normal: None,
+            extra: None,
         };
-        let mut hits = HashMap::new();
+        let mut hits = EntityHashMap::new();
         hits.insert(ui_entity, hit(0.1));
         hits.insert(near, hit(1.0));
         hits.insert(far, hit(5.0));

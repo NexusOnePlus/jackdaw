@@ -6,7 +6,7 @@ fn main() -> AppExit {
         // log errors instead of panicking
         .set_error_handler(bevy::ecs::error::error)
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.set(editor_window_plugin()),
             EnhancedInputPlugin,
             PhysicsPlugins::default(),
             EditorPlugins::default(),
@@ -20,7 +20,7 @@ fn spawn_scene(mut commands: Commands) {
     commands.spawn((
         Name::new("Sun"),
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: 10000.0,
             ..default()
         },

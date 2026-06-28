@@ -18,7 +18,7 @@ use jackdaw_feathers::{
     list_view,
     text_edit::{
         self, TextEditCommitEvent, TextEditConfig, TextEditDragging, TextEditProps, TextEditValue,
-        TextEditVariant, TextEditWrapper, TextInputQueue, set_text_input_value,
+        TextEditVariant, TextEditWrapper, set_text_input_value,
     },
     tokens,
 };
@@ -282,7 +282,7 @@ fn spawn_field_row(
         commands.spawn((
             Text::new(format!("{name}:")),
             TextFont {
-                font_size: tokens::FONT_SM,
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             Node {
@@ -908,7 +908,7 @@ fn spawn_vec3_row(
     commands.spawn((
         Text::new(name),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_TERTIARY),
@@ -992,7 +992,7 @@ fn spawn_vec2_row(
     commands.spawn((
         Text::new(name),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_TERTIARY),
@@ -1074,7 +1074,7 @@ fn spawn_vec4_row(
     commands.spawn((
         Text::new(name),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_TERTIARY),
@@ -1160,7 +1160,7 @@ fn spawn_axis_input(
                 .with_disabled(disabled)
                 .with_prefix(text_edit::TextEditPrefix::Label {
                     label: label.to_string(),
-                    size: tokens::TEXT_SIZE,
+                    size: tokens::TEXT_SIZE_PX,
                     color: Some(label_color),
                 }),
         ),
@@ -1203,8 +1203,8 @@ fn spawn_bool_toggle(
     commands.spawn((
         Text::new(format!("{name}:")),
         TextFont {
-            font: editor_font.clone(),
-            font_size: tokens::FONT_SM,
+            font: editor_font.clone().into(),
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TYPE_BOOL),
@@ -1254,7 +1254,7 @@ fn spawn_color_field(
     commands.spawn((
         Text::new(format!("{name}:")),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_TERTIARY),
@@ -1389,7 +1389,7 @@ fn spawn_numeric_field(
     commands.spawn((
         Text::new(label),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TYPE_NUMERIC),
@@ -1451,7 +1451,7 @@ fn spawn_editable_field(
     commands.spawn((
         Text::new(label),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_TERTIARY),
@@ -1649,7 +1649,7 @@ fn spawn_entity_link(commands: &mut Commands, parent: Entity, target: Entity, la
     commands.spawn((
         Text::new(label),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         TextColor(tokens::TEXT_ACCENT),
@@ -1796,7 +1796,7 @@ fn spawn_text_row(commands: &mut Commands, parent: Entity, text: &str, depth: us
         },
         Text::new(text),
         TextFont {
-            font_size: tokens::FONT_SM,
+            font_size: tokens::TEXT_SIZE_SM,
             ..Default::default()
         },
         ThemedText,
@@ -1950,13 +1950,48 @@ pub(crate) fn on_checkbox_commit(
     });
 }
 
+/// True when any component on `entity_ref` changed within the tick window
+/// `(last_run, this_run]`. Gates the reflection-based field/enum refresh on real
+/// data changes (undo, gizmos, operators, AST live-edit all mark the component
+/// changed) instead of polling reflection every frame.
+fn entity_components_changed(
+    entity_ref: bevy::ecs::world::EntityRef,
+    last_run: bevy::ecs::change_detection::Tick,
+    this_run: bevy::ecs::change_detection::Tick,
+) -> bool {
+    entity_ref.archetype().components().iter().any(|&id| {
+        entity_ref
+            .get_change_ticks_by_id(id)
+            .is_some_and(|ticks| ticks.is_changed(last_run, this_run))
+    })
+}
+
 /// Refreshes inspector field values using reflection -- handles all component types generically.
 /// Uses exclusive world access to avoid query conflicts.
-pub(crate) fn refresh_inspector_fields(world: &mut World) {
-    let selection = world.resource::<Selection>();
-    let Some(primary) = selection.primary() else {
+pub(crate) fn refresh_inspector_fields(
+    world: &mut World,
+    mut last_run: Local<Option<bevy::ecs::change_detection::Tick>>,
+) {
+    let this_run = world.read_change_tick();
+    let prev_run = last_run.replace(this_run);
+
+    let Some(primary) = world.resource::<Selection>().primary() else {
         return;
     };
+
+    // Proper change detection: field values are read from the inspected
+    // entity's components, so only do the reflect + value sync when one of those
+    // components actually changed since this system last ran. Skips the
+    // per-frame reflect + string churn for a static entity; always refreshes on
+    // the first run (`prev_run` is None).
+    if let Some(prev_run) = prev_run {
+        let Ok(entity_ref) = world.get_entity(primary) else {
+            return;
+        };
+        if !entity_components_changed(entity_ref, prev_run, this_run) {
+            return;
+        }
+    }
 
     let type_registry = world.resource::<AppTypeRegistry>().clone();
     let registry = type_registry.read();
@@ -2048,7 +2083,7 @@ pub(crate) fn refresh_inspector_fields(world: &mut World) {
     drop(registry);
 
     // Apply numeric updates: find inner EditorTextEdit entity and use set_text_input_value
-    let input_focus = world.resource::<InputFocus>().0;
+    let input_focus = world.resource::<InputFocus>().get();
     for (outer_entity, value) in numeric_updates {
         // Walk: outer (TextEditConfig) -> children -> wrapper (TextEditWrapper) -> inner entity
         let Some((wrapper_entity, inner_entity)) = find_text_edit_entities(world, outer_entity)
@@ -2066,8 +2101,8 @@ pub(crate) fn refresh_inspector_fields(world: &mut World) {
 
         if let Some(variant) = world.get::<TextEditVariant>(inner_entity).copied() {
             let formatted = text_edit::format_numeric_value(value, variant);
-            if let Some(mut queue) = world.get_mut::<TextInputQueue>(inner_entity) {
-                set_text_input_value(&mut queue, formatted);
+            if let Some(mut editable) = world.get_mut::<bevy::text::EditableText>(inner_entity) {
+                set_text_input_value(&mut editable, formatted);
             }
         }
     }
@@ -2102,6 +2137,7 @@ pub(crate) fn refresh_enum_variants(
     // entity, never a UI container.
     entity_query: Query<bevy::ecs::world::EntityRef, Without<super::EnumVariantHost>>,
     dirty_sources: Query<(), With<super::InspectorDirty>>,
+    system_ticks: bevy::ecs::system::SystemChangeTick,
 ) {
     let Some(primary) = selection.primary() else {
         return;
@@ -2116,6 +2152,16 @@ pub(crate) fn refresh_enum_variants(
     let Ok(entity_ref) = entity_query.get(primary) else {
         return;
     };
+
+    // Proper change detection: only re-check the reflected enum value when a
+    // component on the inspected entity changed since our last run (or the
+    // selection just changed), instead of the per-frame reflect poll the doc
+    // comment above flags as wasteful.
+    if !selection.is_changed()
+        && !entity_components_changed(entity_ref, system_ticks.last_run(), system_ticks.this_run())
+    {
+        return;
+    }
 
     for (container, mut host, children) in &mut hosts {
         if host.source_entity != primary {
@@ -2232,7 +2278,7 @@ fn is_opaque_type(value: &dyn PartialReflect) -> bool {
 fn spawn_enum_field(
     commands: &mut Commands,
     parent: Entity,
-    enum_ref: &dyn bevy::reflect::Enum,
+    enum_ref: &dyn bevy::reflect::enums::Enum,
     depth: usize,
     field_path: String,
     source_entity: Entity,
@@ -2289,7 +2335,7 @@ fn spawn_enum_field(
     let all_unit = (0..enum_info.variant_len()).all(|i| {
         enum_info
             .variant_at(i)
-            .map(|v| matches!(v, bevy::reflect::VariantInfo::Unit(_)))
+            .map(|v| matches!(v, bevy::reflect::enums::VariantInfo::Unit(_)))
             .unwrap_or(false)
     });
 
@@ -2385,7 +2431,7 @@ pub(super) fn spawn_variant_contents(
     commands: &mut Commands,
     container: Entity,
     host: &super::EnumVariantHost,
-    enum_ref: &dyn bevy::reflect::Enum,
+    enum_ref: &dyn bevy::reflect::enums::Enum,
     entity_names: &Query<&Name>,
     type_registry: &AppTypeRegistry,
     editor_font: &Handle<Font>,
@@ -2545,7 +2591,7 @@ fn resolve_enum_info<'a>(
     type_path: &str,
     field_path: &str,
     registry: &'a bevy::reflect::TypeRegistry,
-) -> Option<&'a bevy::reflect::EnumInfo> {
+) -> Option<&'a bevy::reflect::enums::EnumInfo> {
     use bevy::reflect::TypeInfo;
 
     let mut current_reg = registry.get_with_type_path(type_path)?;
@@ -2575,11 +2621,12 @@ fn resolve_enum_info<'a>(
 /// default of the named enum variant. Returns `None` if any field type lacks
 /// `ReflectDefault`.
 fn build_variant_default_json(
-    enum_info: &bevy::reflect::EnumInfo,
+    enum_info: &bevy::reflect::enums::EnumInfo,
     variant_name: &str,
     registry: &bevy::reflect::TypeRegistry,
 ) -> Option<serde_json::Value> {
-    use bevy::reflect::{VariantInfo, prelude::ReflectDefault, serde::TypedReflectSerializer};
+    use bevy::reflect::enums::VariantInfo;
+    use bevy::reflect::{prelude::ReflectDefault, serde::TypedReflectSerializer};
 
     let variant = enum_info.variant(variant_name)?;
 
@@ -2643,6 +2690,40 @@ mod tests {
         assert_eq!(
             parse_to_json_value("north_gate"),
             Value::String("north_gate".to_string())
+        );
+    }
+
+    // Pins the change-detection gate that replaced the per-frame reflection
+    // poll in `refresh_inspector_fields` / `refresh_enum_variants`: a component
+    // mutated between two runs must be detected, and an unchanged entity must
+    // not be. Ticks advance between system runs in reality, so the test
+    // increments the world tick between capturing `last_run` and mutating.
+    #[test]
+    fn entity_components_changed_tracks_mutations() {
+        use super::entity_components_changed;
+        use bevy::prelude::*;
+
+        #[derive(Component)]
+        struct Probe(u32);
+
+        let mut world = World::new();
+        let e = world.spawn(Probe(1)).id();
+
+        let last_run = world.change_tick();
+        world.increment_change_tick();
+        world.entity_mut(e).get_mut::<Probe>().unwrap().0 = 2;
+        world.increment_change_tick();
+        let this_run = world.change_tick();
+        assert!(
+            entity_components_changed(world.entity(e), last_run, this_run),
+            "a mutation between runs must be detected"
+        );
+
+        world.increment_change_tick();
+        let later = world.change_tick();
+        assert!(
+            !entity_components_changed(world.entity(e), this_run, later),
+            "no mutation since `this_run` means no change"
         );
     }
 }

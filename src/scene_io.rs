@@ -50,6 +50,12 @@ const SKIP_COMPONENT_PATHS: &[&str] = &[
     // multiplayer gate on clients). Persisting it plants a rig that fights
     // those systems on every load.
     "jackdaw_camera_rig::ActiveCameraRig",
+    // Render-state handles are always derived in the editor (brush chunks,
+    // terrain chunks, GLTF instances, reference-image quads) and rebuilt
+    // from the authored components on load; serializing them would inline
+    // runtime mesh/material assets into the scene.
+    "bevy_mesh::components::Mesh3d",
+    "bevy_pbr::mesh_material::MeshMaterial3d<bevy_pbr::pbr_material::StandardMaterial>",
 ];
 
 /// Paths that override the skip prefixes  -- these are always saved even if
@@ -70,6 +76,9 @@ const ALWAYS_SAVE_PATHS: &[&str] = &[
     "jackdaw::prefab::components::Prefab",
     "jackdaw::prefab::components::IsA",
     "jackdaw::prefab::components::PrefabEntityId",
+    // Reference image boards persist with the scene; the quad mesh and
+    // material are derived from this component at runtime.
+    "jackdaw::reference_image::ReferenceImage",
 ];
 
 pub fn should_skip_component(type_path: &str) -> bool {
@@ -457,7 +466,7 @@ fn save_scene_inner(world: &mut World) -> Result<(), BevyError> {
 ///
 /// Known limitation: a previously-exported `.nav` is never deleted here. If
 /// a scene once had a navmesh (so `.nav` exists) and the navmesh is later
-/// removed, the stale `.nav` remains on disk. This is intentional for now —
+/// removed, the stale `.nav` remains on disk. This is intentional for now -
 /// deletion risks clobbering a file another tool or the user owns, and a
 /// stale `.nav` is better caught by a freshness check on the load side.
 fn export_navmesh_sibling(world: &World, scene_path: &str) {
@@ -728,7 +737,7 @@ impl<'a> ReflectDeserializerProcessor for JsnDeserializerProcessor<'a> {
             let mut asset_path = crate::entity_ops::to_asset_path(&stem_fs);
             asset_path.push_str(&relative_path[stem_pos..]);
 
-            let handle = self.asset_server.load_untyped(asset_path);
+            let handle = self.asset_server.load_builder().load_untyped(asset_path);
             return Ok(Ok(Box::new(handle).into_partial_reflect()));
         }
 
@@ -1415,13 +1424,15 @@ fn finish_load_scene(world: &mut World, chosen: &std::path::Path) {
         chosen.parent().map(std::path::Path::to_path_buf);
 
     if path.ends_with(".scene.json") {
-        // Legacy format: raw DynamicScene JSON
+        // Legacy format: raw DynamicWorld JSON
         let registry = world.resource::<AppTypeRegistry>().clone();
         let registry = registry.read();
 
-        use bevy::scene::serde::SceneDeserializer;
-        let scene_deserializer = SceneDeserializer {
+        use bevy::world_serialization::serde::WorldDeserializer;
+        let mut asset_server = world.resource_mut::<AssetServer>();
+        let scene_deserializer = WorldDeserializer {
             type_registry: &registry,
+            load_from_path: &mut *asset_server,
         };
         let mut json_de = serde_json::Deserializer::from_str(&json);
         let scene = match scene_deserializer.deserialize(&mut json_de) {
@@ -1631,10 +1642,9 @@ pub fn load_inline_assets(
             let handle = if type_path == "bevy_image::image::Image" {
                 if linear_image_names.contains(name) {
                     asset_server
-                        .load_with_settings::<Image, ImageLoaderSettings>(
-                            &asset_path,
-                            |s: &mut ImageLoaderSettings| s.is_srgb = false,
-                        )
+                        .load_builder()
+                        .with_settings(|s: &mut ImageLoaderSettings| s.is_srgb = false)
+                        .load::<Image>(&asset_path)
                         .untyped()
                 } else {
                     asset_server.load::<Image>(&asset_path).untyped()
@@ -1817,7 +1827,7 @@ pub fn load_scene_from_jsn(
         let asset_server = world.resource::<AssetServer>();
         let asset_path: AssetPath<'static> = crate::entity_ops::to_asset_path(&gltf_path).into();
         let scene = asset_server.load(GltfAssetLabel::Scene(scene_index).from_asset(asset_path));
-        world.entity_mut(entity).insert(SceneRoot(scene));
+        world.entity_mut(entity).insert(WorldAssetRoot(scene));
     }
 
     spawned
@@ -1869,7 +1879,7 @@ pub fn spawn_default_lighting(world: &mut World) {
         .spawn((
             Name::new("Sun"),
             DirectionalLight {
-                shadows_enabled: true,
+                shadow_maps_enabled: true,
                 illuminance: 10000.0,
                 ..default()
             },
@@ -1957,6 +1967,25 @@ fn collect_scene_entities_from_set(
         .filter(|e| !editor_set.contains(e))
         .collect();
 
+    // Bevy 0.19's gizmo plugin spawns named line-renderer entities in the main
+    // world (`LineGizmoRenderer` etc.); they carry only a `Name` and no scene
+    // marker, so the "every named non-editor entity" filter above would
+    // otherwise serialize them into every `.jsn` and undo snapshot. They're
+    // engine internals, not authored content, so drop them.
+    const BEVY_GIZMO_RENDERER_NAMES: &[&str] = &[
+        "LineGizmoRenderer",
+        "LineStripGizmoRenderer",
+        "LineJointGizmoRenderer",
+    ];
+    let roots: Vec<Entity> = roots
+        .into_iter()
+        .filter(|&e| {
+            world
+                .get::<Name>(e)
+                .is_none_or(|n| !BEVY_GIZMO_RENDERER_NAMES.contains(&n.as_str()))
+        })
+        .collect();
+
     // Expand to include all descendants
     let mut scene_set = HashSet::new();
     let mut stack = roots;
@@ -1986,7 +2015,13 @@ fn collect_scene_entities_from_set(
         }
     }
 
-    scene_set.into_iter().collect()
+    // Return in a deterministic order. `scene_set` is a `HashSet`, whose
+    // iteration order varies between captures even for an identical entity set;
+    // sorting makes the snapshot AST canonical so undo equality and `.jsn`
+    // output don't shift when an unrelated entity moves archetypes.
+    let mut ordered: Vec<Entity> = scene_set.into_iter().collect();
+    ordered.sort_unstable();
+    ordered
 }
 
 /// Collect every editor entity: each `EditorEntity` root and its
@@ -2079,16 +2114,16 @@ pub(crate) fn despawn_scene_entities(world: &mut World) -> Result<(), BevyError>
         }
     }
 
-    // Sweep any leftover `BrushFaceEntity` mesh children. Despawning a
-    // parent brush does not always cascade through `ChildOf` in time;
-    // orphan face meshes would otherwise survive, keep their
-    // `Transform` and `MeshMaterial3d`, and render as a ghost box at
-    // world origin in the next scene.
-    let orphan_faces: Vec<Entity> = world
-        .query_filtered::<Entity, With<crate::brush::BrushFaceEntity>>()
+    // Sweep any leftover chunk mesh children. Despawning a parent brush
+    // does not always cascade through `ChildOf` in time; orphan chunk
+    // meshes would otherwise survive, keep their `Transform` and
+    // `MeshMaterial3d`, and render as a ghost box at world origin in
+    // the next scene.
+    let orphan_chunks: Vec<Entity> = world
+        .query_filtered::<Entity, With<crate::brush::BrushMeshChunk>>()
         .iter(world)
         .collect();
-    for entity in orphan_faces {
+    for entity in orphan_chunks {
         if let Ok(entity_mut) = world.get_entity_mut(entity) {
             entity_mut.despawn();
         }
@@ -2877,27 +2912,33 @@ mod navmesh_export_tests {
         // its own threads, so no app tick is needed; we still tick the
         // global pools each iteration as a belt-and-suspenders nudge in
         // case the runner constrained the pool to the calling thread.
-        let mut appeared = false;
+        // Poll for the sibling `.nav` to both exist AND fully decode (bounded
+        // ~3s). The IO pool runs on its own threads and creates the file before
+        // the bytes are flushed, so `exists()` alone races the write and can
+        // read a truncated file; a successful decode is the real readiness
+        // signal. The bytes must decode back into a Navmesh via the same bincode
+        // contract the loader uses (`navmesh.load`). We still tick the global
+        // pools each iteration as a belt-and-suspenders nudge in case the runner
+        // constrained the pool to the calling thread.
+        let config = bincode::config::standard();
+        let mut decoded: Option<Navmesh> = None;
         for _ in 0..300 {
-            if nav_path.exists() {
-                appeared = true;
+            if nav_path.exists()
+                && let Ok(mut file) = std::fs::File::open(&nav_path)
+                && let Ok(nav) = bincode::serde::decode_from_std_read(&mut file, config)
+            {
+                decoded = Some(nav);
                 break;
             }
             bevy::tasks::tick_global_task_pools_on_main_thread();
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            appeared,
-            "sibling .nav was not written within the timeout: {}",
-            nav_path.display()
-        );
-
-        // The bytes must decode back into a Navmesh via the same bincode
-        // contract the loader uses (`navmesh.load`).
-        let mut file = std::fs::File::open(&nav_path).expect("open written .nav");
-        let config = bincode::config::standard();
-        let decoded: Navmesh = bincode::serde::decode_from_std_read(&mut file, config)
-            .expect("written .nav decodes back into a Navmesh");
+        let decoded = decoded.unwrap_or_else(|| {
+            panic!(
+                "sibling .nav was not written and decodable within the timeout: {}",
+                nav_path.display()
+            )
+        });
         assert_eq!(
             decoded,
             empty_navmesh(),

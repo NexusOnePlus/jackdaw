@@ -188,10 +188,10 @@ fn make_app_for_prefab_tests() -> bevy::prelude::App {
     app.add_plugins(
         DefaultPlugins
             .set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(WgpuSettings {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                     backends: None,
                     ..default()
-                }),
+                })),
                 ..default()
             })
             .disable::<WinitPlugin>(),
@@ -3855,8 +3855,8 @@ fn typed_command_and_snapshot_diff_interleave_cleanly_on_undo() {
     // Stack: [Counter, SnapshotDiff]
     //
     // Then:
-    //   Ctrl+Z → pop SnapshotDiff → instance removed, counter still 1
-    //   Ctrl+Z → pop Counter → counter back to 0
+    //   Ctrl+Z -> pop SnapshotDiff -> instance removed, counter still 1
+    //   Ctrl+Z -> pop Counter -> counter back to 0
 
     counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     app.world_mut()
@@ -3918,7 +3918,7 @@ fn typed_command_and_snapshot_diff_interleave_cleanly_on_undo() {
         assert_eq!(q.iter(world).count(), 1, "instance present pre-undo");
     }
 
-    // First undo: pops SnapshotDiff → instance removed, counter unchanged
+    // First undo: pops SnapshotDiff -> instance removed, counter unchanged
     app.world_mut()
         .resource_scope(|world, mut history: bevy::prelude::Mut<CommandHistory>| {
             history.undo(world);
@@ -3934,7 +3934,7 @@ fn typed_command_and_snapshot_diff_interleave_cleanly_on_undo() {
         assert_eq!(q.iter(world).count(), 0, "instance removed by first undo");
     }
 
-    // Second undo: pops Counter → counter back to 0
+    // Second undo: pops Counter -> counter back to 0
     app.world_mut()
         .resource_scope(|world, mut history: bevy::prelude::Mut<CommandHistory>| {
             history.undo(world);

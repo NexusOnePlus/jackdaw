@@ -166,7 +166,7 @@ pub struct PiePlugin;
 impl Plugin for PiePlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<PlayState>()
-            .init_non_send_resource::<PieSession>()
+            .init_non_send::<PieSession>()
             .init_resource::<PieViewMode>()
             .init_resource::<PieInstances>()
             .init_resource::<crate::pie_projection::PieProjection>()
@@ -174,13 +174,22 @@ impl Plugin for PiePlugin {
             .init_resource::<crate::live_edits::LiveEditLog>()
             .init_resource::<crate::live_highlight::LastHighlight>()
             .init_resource::<PieWindowMode>()
+            .init_resource::<PiePrebuildState>()
+            // PIE is an editor-only subsystem; gate it to the editor state so it
+            // never ticks in the launcher (`ProjectSelect`). Without this,
+            // `reconcile_build_status` resets the shared `BuildStatus` from
+            // `Building` to `Idle` every frame during the launcher's editor
+            // build, so the build's completion handler drops the result and the
+            // handoff never fires.
             .add_systems(
                 Update,
                 (
                     advance_pie_session,
+                    prebuild_play_target,
                     drain_game_events,
                     crate::live_highlight::sync_selection_highlight,
-                ),
+                )
+                    .run_if(in_state(crate::AppState::Editor)),
             )
             .add_systems(
                 OnEnter(PlayState::Stopped),
@@ -316,7 +325,7 @@ pub(crate) fn focused_with_fresh_stream(
 /// Where a launched game's window lives. Applies to the next launch.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieWindowMode {
-    /// No OS window: the game renders into the Live viewport stream.
+    /// No OS window: the game streams its frames into the editor's Game panel.
     #[default]
     Embedded,
     /// The game opens its own OS window (debug fallback; no input capture).
@@ -335,12 +344,12 @@ fn toggle_window_mode(mode: &mut PieWindowMode) {
     };
 }
 
-/// Switch the next launch between an embedded (viewport) game and a separate
-/// game window.
+/// Switch the next launch between an embedded game (streamed into the Game
+/// panel) and a separate game window.
 #[operator(
     id = "pie.window_mode_toggle",
     label = "Toggle Game Window Mode",
-    description = "Switch the next launch between embedded (viewport) and a separate game window."
+    description = "Switch the next launch between embedded (Game panel) and a separate game window."
 )]
 pub(crate) fn pie_window_mode_toggle(
     _: In<OperatorParameters>,
@@ -355,7 +364,7 @@ pub(crate) fn pie_window_mode_toggle(
 /// instance that was running. The game reloads its scene from disk.
 pub fn handle_reload(world: &mut World) {
     let keys: Vec<InstanceKey> = world
-        .non_send_resource::<PieSession>()
+        .non_send::<PieSession>()
         .children
         .keys()
         .cloned()
@@ -434,7 +443,7 @@ fn project_root(world: &World) -> Option<PathBuf> {
 /// new build keyed by the spec.
 pub(crate) fn launch_instance(world: &mut World, key: InstanceKey, run: RunConfig) {
     {
-        let session = world.non_send_resource::<PieSession>();
+        let session = world.non_send::<PieSession>();
         if session.is_running(&key) || session.is_pending(&key) {
             return;
         }
@@ -455,12 +464,11 @@ pub(crate) fn launch_instance(world: &mut World, key: InstanceKey, run: RunConfi
 
     // If the build is cached, spawn from it immediately; the session
     // borrow is dropped before spawn_instance reads the world.
-    if let Some(BuildState::Done(path)) = world.non_send_resource::<PieSession>().builds.get(&spec)
-    {
+    if let Some(BuildState::Done(path)) = world.non_send::<PieSession>().builds.get(&spec) {
         let path = path.clone();
         if let Some(stage) = spawn_instance(world, &key, &run, &path) {
             world
-                .non_send_resource_mut::<PieSession>()
+                .non_send_mut::<PieSession>()
                 .children
                 .insert(key, stage);
         }
@@ -468,7 +476,7 @@ pub(crate) fn launch_instance(world: &mut World, key: InstanceKey, run: RunConfi
     }
 
     // Join an in-flight build's pending list, or start a new build.
-    let mut session = world.non_send_resource_mut::<PieSession>();
+    let mut session = world.non_send_mut::<PieSession>();
     match session.builds.get_mut(&spec) {
         Some(BuildState::Running { pending, .. }) => {
             pending.push(PendingSpawn { key, run });
@@ -498,11 +506,7 @@ pub(crate) fn launch_instance(world: &mut World, key: InstanceKey, run: RunConfi
 /// Stop one instance: ask a live child to exit, reap it, and drop it.
 /// Returns to authoring mode once no children remain.
 pub(crate) fn stop_instance(world: &mut World, key: &InstanceKey) {
-    let Some(mut stage) = world
-        .non_send_resource_mut::<PieSession>()
-        .children
-        .remove(key)
-    else {
+    let Some(mut stage) = world.non_send_mut::<PieSession>().children.remove(key) else {
         return;
     };
     match &mut stage {
@@ -520,7 +524,7 @@ pub(crate) fn stop_instance(world: &mut World, key: &InstanceKey) {
     }
     drop(stage);
 
-    if world.non_send_resource::<PieSession>().children.is_empty()
+    if world.non_send::<PieSession>().children.is_empty()
         && *world.resource::<State<PlayState>>().get() != PlayState::Stopped
     {
         world
@@ -581,7 +585,7 @@ pub fn handle_stop(world: &mut World) {
 
     broadcast_control(world, ControlEvent::Stop);
 
-    let mut session = world.non_send_resource_mut::<PieSession>();
+    let mut session = world.non_send_mut::<PieSession>();
     for (_key, mut stage) in session.children.drain() {
         match &mut stage {
             ChildStage::Connecting { child, .. } | ChildStage::Live { child, .. } => {
@@ -617,7 +621,7 @@ fn send_control_to(transport: &mut IpcChannelTransport, event: ControlEvent) {
 /// Send a control message to every live child. Connecting children
 /// (not yet holding a transport) are skipped.
 fn broadcast_control(world: &mut World, event: ControlEvent) {
-    let mut session = world.non_send_resource_mut::<PieSession>();
+    let mut session = world.non_send_mut::<PieSession>();
     for stage in session.children.values_mut() {
         if let ChildStage::Live { transport, .. } = stage {
             send_control_to(transport, event.clone());
@@ -637,7 +641,7 @@ pub(crate) fn send_control_to_focused(world: &mut World, event: ControlEvent) {
         debug!("PIE: control dropped. No focused instance.");
         return;
     };
-    let Some(mut session) = world.get_non_send_resource_mut::<PieSession>() else {
+    let Some(mut session) = world.get_non_send_mut::<PieSession>() else {
         debug!("PIE: control dropped. PieSession not present.");
         return;
     };
@@ -653,7 +657,7 @@ pub(crate) fn send_control_to_focused(world: &mut World, event: ControlEvent) {
 /// or it has already been reaped.
 pub(crate) fn focused_live_instance(world: &World) -> Option<InstanceKey> {
     let focused = world.get_resource::<PieInstances>()?.focused.clone()?;
-    let session = world.get_non_send_resource::<PieSession>()?;
+    let session = world.get_non_send::<PieSession>()?;
     match session.children.get(&focused) {
         Some(ChildStage::Live { .. }) => Some(focused),
         _ => None,
@@ -905,11 +909,68 @@ fn advance_pie_session(world: &mut World) {
     reconcile_build_status(world);
 }
 
+/// One-shot flag so the background pre-build is attempted only once per editor
+/// session, without re-running `cargo metadata` every frame.
+#[derive(Resource, Default)]
+pub struct PiePrebuildState {
+    attempted: bool,
+}
+
+/// Pre-build the default Play target in the background once the editor opens, so
+/// the first Play reuses a warm cache instead of compiling the game's Bevy
+/// variant on demand. Mirrors `launch_instance`'s build but with no pending
+/// spawn: it only drives `PieSession.builds` to `Done`, which a later Play
+/// reuses immediately.
+fn prebuild_play_target(world: &mut World) {
+    if world.resource::<PiePrebuildState>().attempted {
+        return;
+    }
+    // Wait until the project's run configs have loaded.
+    let run = match world.get_resource::<RunConfigs>() {
+        None => return,
+        Some(rc) => rc.manifest.runs.first().cloned(),
+    };
+    // Run configs are loaded; this is the one-shot attempt regardless of outcome.
+    world.resource_mut::<PiePrebuildState>().attempted = true;
+    let Some(run) = run else {
+        return; // no run config to pre-build
+    };
+    let Some(root) = project_root(world) else {
+        return;
+    };
+    let Some(meta) = CargoMeta::load(&root) else {
+        return;
+    };
+    let Some(spec) = resolve_build_spec(&meta, &run) else {
+        return;
+    };
+    let mut session = world.non_send_mut::<PieSession>();
+    if session.builds.contains_key(&spec) {
+        return; // already built or building (the user may have hit Play already)
+    }
+    let progress = Arc::new(Mutex::new(BuildProgress::default()));
+    let sink = Arc::clone(&progress);
+    let build_spec = spec.clone();
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        crate::ext_build::build_game_bin_with_progress(&root, &build_spec, Some(sink), None)
+            .map_err(|err| io::Error::other(err.to_string()))
+    });
+    info!("PIE: pre-building the Play target in the background for a fast first Play");
+    session.builds.insert(
+        spec,
+        BuildState::Running {
+            task,
+            pending: Vec::new(),
+            progress,
+        },
+    );
+}
+
 /// Mirror the active game build into the editor's `BuildStatus` so the
 /// footer shows what is compiling, and clear it once no build remains.
 fn reconcile_build_status(world: &mut World) {
     let building = world
-        .non_send_resource::<PieSession>()
+        .non_send::<PieSession>()
         .builds
         .values()
         .find_map(|build| match build {
@@ -947,7 +1008,7 @@ fn reconcile_build_status(world: &mut World) {
 /// pending instances. The builds map is taken with `mem::take` before
 /// spawning so `spawn_instance` can read the world without aliasing.
 fn poll_builds(world: &mut World) {
-    let mut builds = std::mem::take(&mut world.non_send_resource_mut::<PieSession>().builds);
+    let mut builds = std::mem::take(&mut world.non_send_mut::<PieSession>().builds);
     let mut spawned: Vec<(InstanceKey, ChildStage)> = Vec::new();
 
     for state in builds.values_mut() {
@@ -972,7 +1033,7 @@ fn poll_builds(world: &mut World) {
         }
     }
 
-    let mut session = world.non_send_resource_mut::<PieSession>();
+    let mut session = world.non_send_mut::<PieSession>();
     session.builds = builds;
     for (key, stage) in spawned {
         session.children.insert(key, stage);
@@ -984,7 +1045,7 @@ fn poll_builds(world: &mut World) {
 /// exit are reaped. The children map is taken with `mem::take` and
 /// rebuilt from survivors, moving each `Child` by value.
 fn poll_children(world: &mut World) {
-    let children = std::mem::take(&mut world.non_send_resource_mut::<PieSession>().children);
+    let children = std::mem::take(&mut world.non_send_mut::<PieSession>().children);
 
     let mut survivors: HashMap<InstanceKey, ChildStage> = HashMap::with_capacity(children.len());
     for (key, stage) in children {
@@ -993,7 +1054,7 @@ fn poll_children(world: &mut World) {
         }
     }
 
-    world.non_send_resource_mut::<PieSession>().children = survivors;
+    world.non_send_mut::<PieSession>().children = survivors;
 }
 
 /// Step one child's stage by value, returning the stage it should
@@ -1091,7 +1152,7 @@ fn advance_child(key: &InstanceKey, stage: ChildStage) -> Option<ChildStage> {
 /// Reconcile `PlayState` with live children: any live child implies
 /// `Playing` (unless already `Paused`); zero children implies `Stopped`.
 fn reconcile_play_state(world: &mut World) {
-    let session = world.non_send_resource::<PieSession>();
+    let session = world.non_send::<PieSession>();
     let any_live = session
         .children
         .values()
@@ -1284,7 +1345,7 @@ fn drain_game_events(world: &mut World) {
     let mut pixel_frames: Vec<(InstanceKey, Vec<u8>)> = Vec::new();
 
     {
-        let mut session = world.non_send_resource_mut::<PieSession>();
+        let mut session = world.non_send_mut::<PieSession>();
         for (key, stage) in session.children.iter_mut() {
             let ChildStage::Live { transport, .. } = stage else {
                 continue;

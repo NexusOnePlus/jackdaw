@@ -1,8 +1,8 @@
 use bevy::{
+    dev_tools::infinite_grid::{InfiniteGrid, InfiniteGridSettings},
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
 };
-use bevy_infinite_grid::{InfiniteGrid, InfiniteGridSettings};
 use jackdaw_api::op::{Operator, OperatorCommandsExt as _};
 
 use crate::default_style;
@@ -26,35 +26,29 @@ impl Plugin for SnappingPlugin {
     }
 }
 
-#[derive(Resource)]
-pub struct GridSettings {
-    pub visible: bool,
-    pub scale: f32,
-    pub major_line_color: Color,
-    pub minor_line_color: Color,
-    pub x_axis_color: Color,
-    pub z_axis_color: Color,
-    pub fadeout_distance: f32,
-}
+/// Editor-wide infinite grid appearance. Wraps [`InfiniteGridSettings`] so
+/// the same value can be stored as a resource and copied onto grid entities.
+#[derive(Resource, Clone, Copy, Deref, DerefMut)]
+pub struct GridSettings(pub InfiniteGridSettings);
 
 impl Default for GridSettings {
     fn default() -> Self {
-        Self {
-            visible: true,
+        Self(InfiniteGridSettings {
             scale: 4.0,
             major_line_color: default_style::GRID_MAJOR_LINE,
             minor_line_color: default_style::GRID_MINOR_LINE,
             x_axis_color: default_style::AXIS_X,
             z_axis_color: default_style::AXIS_Z,
             fadeout_distance: 100.0,
-        }
+            ..Default::default()
+        })
     }
 }
 
-fn sync_grid_settings(
+pub(crate) fn sync_grid_settings(
     snap: Res<SnapSettings>,
     mut grid: ResMut<GridSettings>,
-    mut grids: Query<(&mut InfiniteGridSettings, &mut Visibility), With<InfiniteGrid>>,
+    mut grids: Query<&mut InfiniteGridSettings, With<InfiniteGrid>>,
 ) {
     // Sync grid scale from snap settings whenever snap changes.
     // InfiniteGrid scale is lines-per-unit (density), so use the reciprocal of cell size.
@@ -64,174 +58,29 @@ fn sync_grid_settings(
     if !grid.is_changed() {
         return;
     }
-    for (mut settings, mut visibility) in &mut grids {
-        settings.scale = grid.scale;
-        settings.major_line_color = grid.major_line_color;
-        settings.minor_line_color = grid.minor_line_color;
-        settings.x_axis_color = grid.x_axis_color;
-        settings.z_axis_color = grid.z_axis_color;
-        settings.fadeout_distance = grid.fadeout_distance;
-        *visibility = if grid.visible {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+    for mut settings in &mut grids {
+        *settings = grid.0;
     }
 }
 
-pub const GRID_POWER_MIN: i32 = -5;
-pub const GRID_POWER_MAX: i32 = 8;
+pub use jackdaw_snap::{GRID_POWER_MAX, GRID_POWER_MIN};
 
-#[derive(Resource, Clone, PartialEq)]
-pub struct SnapSettings {
-    pub translate_snap: bool,
-    pub translate_increment: f32,
-    pub rotate_snap: bool,
-    pub rotate_increment: f32,
-    pub scale_snap: bool,
-    pub scale_increment: f32,
-    /// Exponential grid power. Actual grid size = `2^grid_power`.
-    pub grid_power: i32,
-}
-
-impl Default for SnapSettings {
-    fn default() -> Self {
-        let grid_power = -2;
-        Self {
-            translate_snap: true,
-            translate_increment: 2.0_f32.powi(grid_power),
-            rotate_snap: true,
-            rotate_increment: 15.0_f32.to_radians(),
-            scale_snap: true,
-            scale_increment: 0.1,
-            grid_power,
-        }
-    }
-}
-
-impl SnapSettings {
-    /// Actual grid size derived from `grid_power`: `2^grid_power`.
-    pub fn grid_size(&self) -> f32 {
-        2.0_f32.powi(self.grid_power)
-    }
-
-    /// Snap a world position to the nearest grid line on each axis.
-    /// Independent of the per-tool snap flags; callers gate on the
-    /// relevant toggle (e.g. `scale_active`).
-    pub fn snap_position_to_grid(&self, v: Vec3) -> Vec3 {
-        let g = self.grid_size();
-        if g > 0.0 {
-            Vec3::new(
-                (v.x / g).round() * g,
-                (v.y / g).round() * g,
-                (v.z / g).round() * g,
-            )
-        } else {
-            v
-        }
-    }
-
-    /// Snap a translation value to the nearest increment.
-    pub fn snap_translate(&self, value: f32) -> f32 {
-        if self.translate_snap && self.translate_increment > 0.0 {
-            (value / self.translate_increment).round() * self.translate_increment
-        } else {
-            value
-        }
-    }
-
-    /// Snap a translation vector.
-    pub fn snap_translate_vec3(&self, v: Vec3) -> Vec3 {
-        Vec3::new(
-            self.snap_translate(v.x),
-            self.snap_translate(v.y),
-            self.snap_translate(v.z),
-        )
-    }
-
-    /// Snap a rotation angle to the nearest increment.
-    pub fn snap_rotate(&self, angle: f32) -> f32 {
-        if self.rotate_snap && self.rotate_increment > 0.0 {
-            (angle / self.rotate_increment).round() * self.rotate_increment
-        } else {
-            angle
-        }
-    }
-
-    /// Snap a scale value to the nearest increment.
-    pub fn snap_scale(&self, value: f32) -> f32 {
-        if self.scale_snap && self.scale_increment > 0.0 {
-            (value / self.scale_increment).round() * self.scale_increment
-        } else {
-            value
-        }
-    }
-
-    /// Snap a scale vector.
-    pub fn snap_scale_vec3(&self, v: Vec3) -> Vec3 {
-        Vec3::new(
-            self.snap_scale(v.x),
-            self.snap_scale(v.y),
-            self.snap_scale(v.z),
-        )
-    }
-
-    /// Check if translate snapping should be active (Ctrl held = toggle snap).
-    pub fn translate_active(&self, ctrl_held: bool) -> bool {
-        self.translate_snap ^ ctrl_held
-    }
-
-    /// Check if rotate snapping should be active (Ctrl held = toggle snap).
-    pub fn rotate_active(&self, ctrl_held: bool) -> bool {
-        self.rotate_snap ^ ctrl_held
-    }
-
-    /// Check if scale snapping should be active (Ctrl held = toggle snap).
-    pub fn scale_active(&self, ctrl_held: bool) -> bool {
-        self.scale_snap ^ ctrl_held
-    }
-
-    /// Conditionally snap a translation vector based on Ctrl state.
-    pub fn snap_translate_vec3_if(&self, v: Vec3, ctrl_held: bool) -> Vec3 {
-        if self.translate_active(ctrl_held) && self.translate_increment > 0.0 {
-            Vec3::new(
-                (v.x / self.translate_increment).round() * self.translate_increment,
-                (v.y / self.translate_increment).round() * self.translate_increment,
-                (v.z / self.translate_increment).round() * self.translate_increment,
-            )
-        } else {
-            v
-        }
-    }
-
-    /// Conditionally snap a rotation angle based on Ctrl state.
-    pub fn snap_rotate_if(&self, angle: f32, ctrl_held: bool) -> f32 {
-        if self.rotate_active(ctrl_held) && self.rotate_increment > 0.0 {
-            (angle / self.rotate_increment).round() * self.rotate_increment
-        } else {
-            angle
-        }
-    }
-
-    /// Conditionally snap a scale vector based on Ctrl state.
-    pub fn snap_scale_vec3_if(&self, v: Vec3, ctrl_held: bool) -> Vec3 {
-        if self.scale_active(ctrl_held) && self.scale_increment > 0.0 {
-            Vec3::new(
-                (v.x / self.scale_increment).round() * self.scale_increment,
-                (v.y / self.scale_increment).round() * self.scale_increment,
-                (v.z / self.scale_increment).round() * self.scale_increment,
-            )
-        } else {
-            v
-        }
-    }
-}
+/// Bevy resource wrapper over the engine-agnostic [`jackdaw_snap::SnapSettings`].
+/// Derefs to the inner value, so reads, the `snap_*` methods, and field access
+/// resolve through `Deref`/`DerefMut` unchanged. The snapping math lives in
+/// `jackdaw_snap`; this newtype is the editor's adapter.
+#[derive(Resource, Clone, PartialEq, Default, Deref, DerefMut)]
+pub struct SnapSettings(pub jackdaw_snap::SnapSettings);
 
 /// Scroll-wheel grid size control. Continuous-input, so it stays as a
 /// system rather than an operator. The actual power bump is delegated
 /// to [`crate::grid_ops::GridIncreaseOp`] /
 /// [`crate::grid_ops::GridDecreaseOp`] (also bound to the bracket
 /// keys) so the clamp + translate-increment refresh live in one place.
+///
+/// Raw wheel read kept: grid-size stepping is gated behind a held modifier
+/// chord and predates the keymap engine; migrates with the binding-layer
+/// follow-up.
 fn handle_grid_size_scroll(
     keyboard: Res<ButtonInput<KeyCode>>,
     keybind_focus: crate::keybind_focus::KeybindFocus,

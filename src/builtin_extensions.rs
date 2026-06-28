@@ -9,6 +9,7 @@ use jackdaw_api::{
     prelude::{ExtensionContext, ExtensionKind, JackdawExtension, WindowDescriptor},
 };
 use jackdaw_feathers::icons::Icon;
+use jackdaw_feathers::tokens;
 
 /// Reflect type paths of jackdaw's authorable world components paired with
 /// their outliner icon, in priority order. Type paths use each type's
@@ -22,6 +23,7 @@ pub(crate) const WORLD_ENTITY_ICONS: &[(&str, Icon)] = &[
     ("jackdaw::entity_ops::SceneReflectionProbe", Icon::Sparkles),
     ("jackdaw::entity_ops::SceneAnimationPlayer", Icon::Play),
     ("jackdaw::entity_ops::SceneAudioSource", Icon::Volume2),
+    ("jackdaw::reference_image::ReferenceImage", Icon::Image),
 ];
 
 /// Icon for the camera-rig component, gated to match the `camera_rig`
@@ -84,7 +86,7 @@ impl JackdawExtension for CoreWindowsExtension {
                         children![(
                             Text::new("Import"),
                             TextFont {
-                                font_size: 11.0,
+                                font_size: tokens::TEXT_SIZE_SM,
                                 ..default()
                             },
                             TextColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
@@ -280,7 +282,7 @@ impl JackdawExtension for TerminalExtension {
                         children![(
                             Text::new("Terminal window (not implemented yet)"),
                             TextFont {
-                                font_size: 11.0,
+                                font_size: tokens::TEXT_SIZE_SM,
                                 ..default()
                             },
                             TextColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
@@ -359,7 +361,7 @@ impl JackdawExtension for InspectorExtension {
                         children![(
                             Text::new("Resources"),
                             TextFont {
-                                font_size: 11.0,
+                                font_size: tokens::TEXT_SIZE_SM,
                                 ..default()
                             },
                             TextColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
@@ -384,7 +386,7 @@ impl JackdawExtension for InspectorExtension {
                         children![(
                             Text::new("Systems"),
                             TextFont {
-                                font_size: 11.0,
+                                font_size: tokens::TEXT_SIZE_SM,
                                 ..default()
                             },
                             TextColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
@@ -419,6 +421,7 @@ mod tests {
             registry.register::<crate::entity_ops::SceneReflectionProbe>();
             registry.register::<crate::entity_ops::SceneAnimationPlayer>();
             registry.register::<crate::entity_ops::SceneAudioSource>();
+            registry.register::<crate::reference_image::ReferenceImage>();
             #[cfg(feature = "camera_rig")]
             registry.register::<jackdaw_camera_rig::CameraRig>();
         }
@@ -459,6 +462,12 @@ mod tests {
             (
                 world.spawn(crate::entity_ops::SceneAudioSource).id(),
                 Icon::Volume2,
+            ),
+            (
+                world
+                    .spawn(crate::reference_image::ReferenceImage::default())
+                    .id(),
+                Icon::Image,
             ),
         ];
         for (entity, expected) in cases {

@@ -1,5 +1,5 @@
 //! Workspace switcher dropdown. The trigger sits in the right side
-//! of the window header next to the Play/Pause pill; it shows the
+//! of the window title bar next to the Play/Pause pill; it shows the
 //! current workspace name and a chevron. Clicking it opens a popover
 //! listing every workspace plus a "+ New Workspace" item.
 //!
@@ -41,7 +41,7 @@ impl Plugin for WorkspaceDropdownPlugin {
     }
 }
 
-/// Marker on the trigger button (sits in the window header).
+/// Marker on the trigger button (sits in the window title bar).
 #[derive(Component)]
 pub struct WorkspaceDropdownTrigger;
 
@@ -60,8 +60,8 @@ pub struct WorkspaceDropdownState {
     pub popover_entity: Option<Entity>,
 }
 
-/// Header trigger bundle. Mount inside the right-hand group of
-/// `window_header` next to the Play/Pause pill.
+/// Title bar trigger bundle. Mount inside the right-hand group of
+/// `window_title_bar` next to the Play/Pause pill.
 pub fn workspace_dropdown_trigger(
     editor_font: Handle<Font>,
     icon_font: Handle<Font>,
@@ -76,7 +76,7 @@ pub fn workspace_dropdown_trigger(
             padding: UiRect::axes(Val::Px(10.0), Val::Px(3.0)),
             border: UiRect::all(Val::Px(1.0)),
             border_radius: BorderRadius::all(Val::Px(tokens::BORDER_RADIUS_MD)),
-            height: Val::Px(22.0),
+            height: Val::Px(tokens::HEADER_CONTROL_HEIGHT),
             min_width: Val::Px(120.0),
             ..Default::default()
         },
@@ -87,8 +87,8 @@ pub fn workspace_dropdown_trigger(
                 WorkspaceDropdownTriggerLabel,
                 Text::default(),
                 TextFont {
-                    font: editor_font,
-                    font_size: tokens::FONT_SM,
+                    font: editor_font.into(),
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_PRIMARY),
@@ -104,8 +104,8 @@ pub fn workspace_dropdown_trigger(
             (
                 Text::new(String::from(Icon::ChevronDown.unicode())),
                 TextFont {
-                    font: icon_font,
-                    font_size: 10.0,
+                    font: icon_font.into(),
+                    font_size: tokens::TEXT_SIZE_XS,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_SECONDARY),
@@ -290,8 +290,8 @@ fn spawn_popover_row(
         world.spawn((
             Text::new(glyph.to_string()),
             TextFont {
-                font: handle,
-                font_size: 12.0,
+                font: handle.into(),
+                font_size: tokens::TEXT_SIZE,
                 ..Default::default()
             },
             TextColor(label_color),
@@ -301,11 +301,11 @@ fn spawn_popover_row(
     }
 
     let mut label_font = TextFont {
-        font_size: tokens::FONT_SM,
+        font_size: tokens::TEXT_SIZE_SM,
         ..Default::default()
     };
     if let Some(handle) = editor_font {
-        label_font.font = handle;
+        label_font.font = handle.into();
     }
     world.spawn((
         WorkspaceTabLabel {
@@ -360,8 +360,8 @@ fn spawn_popover_add_row(
         world.spawn((
             Text::new(String::from(Icon::Plus.unicode())),
             TextFont {
-                font: handle,
-                font_size: 12.0,
+                font: handle.into(),
+                font_size: tokens::TEXT_SIZE,
                 ..Default::default()
             },
             TextColor(tokens::DOC_TAB_INACTIVE_LABEL),
@@ -371,11 +371,11 @@ fn spawn_popover_add_row(
     }
 
     let mut label_font = TextFont {
-        font_size: tokens::FONT_SM,
+        font_size: tokens::TEXT_SIZE_SM,
         ..Default::default()
     };
     if let Some(handle) = editor_font {
-        label_font.font = handle;
+        label_font.font = handle.into();
     }
     world.spawn((
         LocalizedText::new("new-workspace"),

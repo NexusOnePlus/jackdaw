@@ -1,5 +1,6 @@
 use bevy::color::palettes::tailwind;
 use bevy::prelude::*;
+use bevy::text::FontSize;
 
 // ---------------------------------------------------------------------------
 // Corner radii
@@ -15,6 +16,10 @@ pub const CORNER_RADIUS_LG: Val = Val::Px(4.0);
 pub const PRIMARY_COLOR: Srgba = tailwind::BLUE_500;
 /// Accent blue used for selections, active tabs, and highlights (#206EC8).
 pub const ACCENT_BLUE: Color = Color::srgb(0.126, 0.431, 0.784);
+/// Destructive action background (#EF4444, Tailwind red-500).
+pub const DESTRUCTIVE_RED: Srgba = tailwind::RED_500;
+/// Destructive hover / close-button hover background (#DC2626, Tailwind red-600).
+pub const DESTRUCTIVE_RED_HOVER: Srgba = tailwind::RED_600;
 
 // ---------------------------------------------------------------------------
 // Backgrounds (from Figma CSS, updated palette, slightly bluer tones)
@@ -90,6 +95,8 @@ pub const HEADER_CONTROL_BG: Color = Color::srgb(0.212, 0.216, 0.231);
 pub const HEADER_CONTROL_BORDER: Color = Color::srgb(0.255, 0.255, 0.259);
 /// Label color inside the Scene View dropdown (Figma #DADADA)
 pub const HEADER_CONTROL_LABEL: Color = Color::srgb(0.855, 0.855, 0.855);
+/// Height shared by header pills: scene tabs, workspace dropdown, play/pause.
+pub const HEADER_CONTROL_HEIGHT: f32 = 22.0;
 
 // ---------------------------------------------------------------------------
 // Viewport-specific backgrounds
@@ -275,17 +282,17 @@ pub const FILE_ICON_COLOR: Color = Color::Srgba(tailwind::ZINC_400);
 // Typography
 // ---------------------------------------------------------------------------
 
-pub const TEXT_SIZE_XS: f32 = 9.0;
-pub const TEXT_SIZE_SM: f32 = 11.0;
-pub const TEXT_SIZE: f32 = 13.0;
-pub const TEXT_SIZE_LG: f32 = 15.0;
-pub const TEXT_SIZE_XL: f32 = 18.0;
+pub const TEXT_SIZE_XS_PX: f32 = 9.0;
+pub const TEXT_SIZE_SM_PX: f32 = 11.0;
+pub const TEXT_SIZE_PX: f32 = 13.0;
+pub const TEXT_SIZE_LG_PX: f32 = 15.0;
+pub const TEXT_SIZE_XL_PX: f32 = 18.0;
 
-// Keep old names as aliases for existing code
-pub const FONT_XS: f32 = TEXT_SIZE_XS;
-pub const FONT_SM: f32 = TEXT_SIZE_SM;
-pub const FONT_MD: f32 = TEXT_SIZE;
-pub const FONT_LG: f32 = TEXT_SIZE_LG;
+pub const TEXT_SIZE_XS: FontSize = FontSize::Px(TEXT_SIZE_XS_PX);
+pub const TEXT_SIZE_SM: FontSize = FontSize::Px(TEXT_SIZE_SM_PX);
+pub const TEXT_SIZE: FontSize = FontSize::Px(TEXT_SIZE_PX);
+pub const TEXT_SIZE_LG: FontSize = FontSize::Px(TEXT_SIZE_LG_PX);
+pub const TEXT_SIZE_XL: FontSize = FontSize::Px(TEXT_SIZE_XL_PX);
 
 /// Truncation width for browser thumbnail filename labels (asset
 /// browser, material browser).
@@ -304,11 +311,15 @@ pub const PREVIEW_IMAGE_SIZE: f32 = 128.0;
 // ---------------------------------------------------------------------------
 
 /// Small icon size, standard Lucide icons (15px frame)
-pub const ICON_SM: f32 = 15.0;
+pub const ICON_SM_PX: f32 = 15.0;
 /// Medium icon size, sidebar icons (17px)
-pub const ICON_MD: f32 = 17.0;
+pub const ICON_MD_PX: f32 = 17.0;
 /// Large icon size (24px)
-pub const ICON_LG: f32 = 24.0;
+pub const ICON_LG_PX: f32 = 24.0;
+
+pub const ICON_SM: FontSize = FontSize::Px(ICON_SM_PX);
+pub const ICON_MD: FontSize = FontSize::Px(ICON_MD_PX);
+pub const ICON_LG: FontSize = FontSize::Px(ICON_LG_PX);
 
 // ---------------------------------------------------------------------------
 // Spacing
@@ -325,8 +336,8 @@ pub const SPACING_LG: f32 = 12.0;
 
 pub const ROW_HEIGHT: f32 = 24.0;
 pub const HEADER_HEIGHT: f32 = 28.0;
+pub const WINDOW_TITLE_BAR_HEIGHT: f32 = 36.0;
 pub const STATUS_BAR_HEIGHT: f32 = 22.0;
-pub const MENU_BAR_HEIGHT: f32 = 28.0;
 pub const INPUT_HEIGHT: f32 = 28.0;
 
 /// Panel tab bar height (Figma: 30px)

@@ -10,6 +10,7 @@ pub mod alignment_guides;
 pub mod app_ops;
 pub mod asset_browser;
 pub mod asset_catalog;
+pub mod asset_ingest;
 pub mod brush;
 pub mod brush_drag_ops;
 pub mod brush_element_ops;
@@ -31,6 +32,7 @@ pub mod gizmos;
 pub mod grid_ops;
 pub mod hierarchy;
 pub mod history_ops;
+pub mod input_contexts;
 pub mod inspector;
 pub mod keybind_focus;
 pub mod keybind_settings;
@@ -60,7 +62,11 @@ pub mod live_input;
 pub mod material_browser;
 pub mod material_preview;
 pub mod measure_tool;
+pub mod mesh_quick_menu;
+pub mod migrate;
+pub mod modal_inputs;
 pub mod modal_transform;
+pub mod modifier_ops;
 pub mod navmesh;
 pub mod new_project;
 pub mod numeric_transform;
@@ -72,13 +78,16 @@ pub mod pie_menu;
 pub mod pie_mirror;
 pub mod pie_projection;
 pub mod prefab;
+pub mod preflight;
 pub mod project;
 pub mod project_files;
 pub mod project_select;
+pub mod reference_image;
 pub mod reflect_default;
 pub mod remote;
 pub mod restart;
 pub mod run_config;
+pub mod scaffold;
 pub mod scene_io;
 pub mod scene_ops;
 pub mod scenes;
@@ -98,6 +107,7 @@ pub mod viewport;
 pub mod viewport_overlays;
 pub mod viewport_select;
 pub mod viewport_util;
+pub mod windowing;
 pub mod workspace_dropdown;
 
 use bevy::{
@@ -105,7 +115,6 @@ use bevy::{
     ecs::system::SystemState,
     feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme},
     input::mouse::{MouseScrollUnit, MouseWheel},
-    input_focus::InputDispatchPlugin,
     picking::hover::HoverMap,
     platform::collections::HashMap,
     prelude::*,
@@ -123,9 +132,10 @@ use selection::Selection;
 
 /// Everything needed to start using Jackdaw.
 pub mod prelude {
+    pub use crate::windowing::{editor_window_plugin, primary_window_attributes};
     pub use crate::{
         DylibLoaderPlugin, EditorCategory, EditorDescription, EditorHidden, EditorPlugins,
-        ExtensionPlugin, SkipSerialization,
+        ExtensionPlugin, SkipSerialization, editor_main,
     };
     pub use jackdaw_api::prelude::*;
 
@@ -147,9 +157,15 @@ pub struct EditorInteractionSystems;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JackdawDrawSystems;
 
-/// Run condition: returns `true` when no `EditorDialog` entity exists.
-pub fn no_dialog_open(dialogs: Query<(), With<EditorDialog>>) -> bool {
-    dialogs.is_empty()
+/// Run condition: returns `true` when no `EditorDialog` and no
+/// pointer-blocking overlay (`BlocksCameraInput`, e.g. the component and
+/// entity pickers) exists. Both must freeze viewport interaction so a click on
+/// an overlay row does not also fall through to viewport selection.
+pub fn no_dialog_open(
+    dialogs: Query<(), With<EditorDialog>>,
+    overlays: Query<(), With<BlocksCameraInput>>,
+) -> bool {
+    dialogs.is_empty() && overlays.is_empty()
 }
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -159,7 +175,7 @@ pub enum AppState {
     Editor,
 }
 
-#[derive(Component, Default)]
+#[derive(Component, Copy, Clone, Default)]
 pub struct EditorEntity;
 
 /// Marker component for UI overlays that should block viewport camera input
@@ -254,30 +270,89 @@ impl PluginGroup for EditorPlugins {
     }
 }
 
+/// One-call entry point for a per-project editor binary. Encapsulates the full
+/// `DefaultPlugins` + ambient-plugin + `EditorPlugins` + auto-open setup so a
+/// project's `src/bin/editor.rs` is a single line:
+///
+/// ```ignore
+/// fn main() -> AppExit {
+///     jackdaw::editor_main(my_game::MyGamePlugin)
+/// }
+/// ```
+///
+/// Pass the game's plugin (or a tuple of plugins) so the editor links the
+/// project's reflected component types into its registry. Without that
+/// reference the linker strips the registrations and the component picker comes
+/// up empty (Bevy's `reflect_auto_register` only sees referenced crates).
+///
+/// The project opens automatically: the launcher hands off via the
+/// `JACKDAW_PROJECT` env var, and `cargo editor` from a project shell falls back
+/// to the current directory. The asset root is the project's `assets/`, and the
+/// `Repeat` image sampler matches how brush materials tile at runtime.
+pub fn editor_main<M>(game: impl bevy::app::Plugins<M>) -> AppExit {
+    use bevy::asset::AssetPlugin;
+    use bevy::image::{ImageAddressMode, ImagePlugin, ImageSamplerDescriptor};
+
+    // Claim SIGINT/SIGTERM before wgpu/gilrs install handlers that swallow it.
+    let _ = ctrlc::set_handler(|| std::process::exit(130));
+
+    let project_root = std::env::var_os("JACKDAW_PROJECT")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let asset_root = project_root
+        .as_ref()
+        .map(|p| p.join("assets").to_string_lossy().to_string())
+        .unwrap_or_else(|| "assets".to_string());
+
+    let mut app = App::new();
+    app.set_error_handler(bevy::ecs::error::error)
+        .add_plugins(
+            DefaultPlugins
+                .set(AssetPlugin {
+                    file_path: asset_root,
+                    ..default()
+                })
+                .set(ImagePlugin {
+                    default_sampler: ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        address_mode_v: ImageAddressMode::Repeat,
+                        address_mode_w: ImageAddressMode::Repeat,
+                        ..ImageSamplerDescriptor::linear()
+                    },
+                })
+                .set(crate::windowing::editor_window_plugin()),
+        )
+        .add_plugins((
+            avian3d::prelude::PhysicsPlugins::default(),
+            bevy_enhanced_input::prelude::EnhancedInputPlugin,
+        ))
+        .add_plugins(EditorPlugins::default())
+        .add_plugins(game);
+
+    if let Some(root) = project_root.filter(|p| p.is_dir()) {
+        // This binary IS the editor; no build step to wait for.
+        app.insert_resource(crate::project_select::PendingAutoOpen {
+            path: root,
+            skip_build: true,
+        });
+    }
+
+    app.run()
+}
+
 /// Plugin required for the Jackdaw's core functionality.
 #[derive(Default)]
 pub struct EditorCorePlugin;
 
 impl Plugin for EditorCorePlugin {
     fn build(&self, app: &mut App) {
-        // Disable `InputDispatchPlugin` from FeathersPlugins
-        // because `bevy_ui_text_input`'s `TextInputPlugin` adds
-        // it unconditionally and panics on duplicates.
-        //
-        // `EnhancedInputPlugin` is owned by the hosting binary's
-        // `main.rs` (launcher + the static template's
-        // `editor.rs.template`). Asserting presence here, rather
-        // than adding it, lets user `MyGamePlugin`s add the same
-        // plugin without a duplicate-plugin panic.
         debug_assert!(
             app.is_plugin_added::<EnhancedInputPlugin>(),
             "EditorCorePlugin requires EnhancedInputPlugin first; \
              add `EnhancedInputPlugin` in main.rs before EditorPlugins."
         );
-        app.init_state::<AppState>().add_plugins((
-            FeathersPlugins.build().disable::<InputDispatchPlugin>(),
-            EditorFeathersPlugin,
-        ));
+        app.init_state::<AppState>()
+            .add_plugins((FeathersPlugins, EditorFeathersPlugin));
         app.add_plugins((
             jackdaw_jsn::JsnPlugin {
                 runtime_mesh_rebuild: false,
@@ -325,9 +400,14 @@ impl Plugin for EditorCorePlugin {
             measure_tool::MeasureToolPlugin,
             draw_brush::DrawBrushPlugin,
             face_grid::FaceGridPlugin,
+            brush::mirror_plane_overlay::MirrorPlaneOverlayPlugin,
+            asset_ingest::AssetIngestPlugin,
             alignment_guides::AlignmentGuidesPlugin,
             navmesh::NavmeshPlugin,
             terrain::TerrainPlugin,
+            reference_image::ReferenceImagePlugin,
+            jackdaw_widgets::RadialMenuPlugin,
+            mesh_quick_menu::MeshQuickMenuPlugin,
             remote::RemoteConnectionPlugin,
         ))
         .add_plugins(jackdaw_avian_integration::PhysicsOverlaysPlugin::<
@@ -339,7 +419,9 @@ impl Plugin for EditorCorePlugin {
         .add_plugins(operator_tooltip::OperatorTooltipPlugin)
         .add_plugins(jackdaw_node_graph::NodeGraphPlugin)
         .add_plugins(jackdaw_animation::AnimationPlugin)
+        .add_plugins(windowing::WindowingPlugin)
         .add_plugins(jackdaw_panels::DockPlugin)
+        .add_plugins(input_contexts::InputContextsPlugin)
         .add_plugins(jackdaw_api_internal::ExtensionLoaderPlugin)
         .add_plugins(extension_watcher::ExtensionWatcherPlugin)
         .add_plugins(extensions_dialog::ExtensionsDialogPlugin)
@@ -373,7 +455,7 @@ impl Plugin for EditorCorePlugin {
             Update,
             EditorInteractionSystems
                 .run_if(in_state(AppState::Editor))
-                .run_if(no_dialog_open.and(crate::live_edits_ui::stop_prompt_closed)),
+                .run_if(no_dialog_open.and_then(crate::live_edits_ui::stop_prompt_closed)),
         )
         .configure_sets(
             PostUpdate,
@@ -383,6 +465,7 @@ impl Plugin for EditorCorePlugin {
                 .run_if(in_state(crate::AppState::Editor)),
         )
         .insert_resource(UiTheme(create_dark_theme()))
+        .insert_resource(jackdaw_api_internal::load_active_keymap_preset())
         .init_resource::<layout::ActiveDocument>()
         .init_resource::<layout::SceneViewPreset>()
         .init_resource::<asset_catalog::AssetCatalog>()
@@ -398,7 +481,13 @@ impl Plugin for EditorCorePlugin {
         .add_observer(flag_menu_dirty_on_menu_entry_remove)
         .add_systems(
             OnEnter(AppState::Editor),
-            (spawn_layout, init_layout, populate_menu).chain(),
+            (
+                layout::spawn_editor_layout,
+                ApplyDeferred,
+                init_layout,
+                populate_menu,
+            )
+                .chain(),
         )
         .add_systems(OnEnter(AppState::Editor), run_config::read_run_configs)
         .add_systems(
@@ -411,6 +500,7 @@ impl Plugin for EditorCorePlugin {
             (
                 send_scroll_events,
                 layout::update_toolbar_button_variants,
+                layout::update_grid_size_label,
                 layout::update_active_document_display,
                 layout::update_tab_strip_highlights,
                 layout::update_pie_view_toggle_appearance,
@@ -578,7 +668,7 @@ fn auto_hide_internal_entities(
             Added<Transform>,
             Without<EditorEntity>,
             Without<EditorHidden>,
-            Without<brush::BrushFaceEntity>,
+            Without<brush::BrushMeshChunk>,
         ),
     >,
     parent_query: Query<&ChildOf>,
@@ -605,15 +695,6 @@ fn auto_hide_internal_entities(
             }
         }
     }
-}
-
-fn spawn_layout(
-    mut commands: Commands,
-    icon_font: Res<jackdaw_feathers::icons::IconFont>,
-    editor_font: Res<jackdaw_feathers::icons::EditorFont>,
-) {
-    commands.spawn((Camera2d, EditorEntity));
-    commands.spawn(layout::editor_layout(&icon_font, &editor_font));
 }
 
 /// Spawn a new keyframe clip on the same target as the currently-
@@ -1232,7 +1313,7 @@ fn has_selected_keyframes(
         )>,
     >,
 ) -> bool {
-    if input_focus.0.is_some() {
+    if input_focus.get().is_some() {
         return false;
     }
     selection.entities.iter().any(|&e| keyframes.contains(e))
@@ -1244,7 +1325,7 @@ fn timeline_with_clip(
     tree: Res<jackdaw_panels::tree::DockTree>,
     selected_clip: Res<jackdaw_animation::SelectedClip>,
 ) -> bool {
-    if input_focus.0.is_some() || active.is_modal_running() {
+    if input_focus.get().is_some() || active.is_modal_running() {
         return false;
     }
     if !crate::transform_ops::active_tab_kind_present(&tree, "jackdaw.timeline") {
@@ -1260,7 +1341,7 @@ fn timeline_paste_available(
     selected_clip: Res<jackdaw_animation::SelectedClip>,
     clipboard: Res<jackdaw_animation::KeyframeClipboard>,
 ) -> bool {
-    if input_focus.0.is_some() || active.is_modal_running() {
+    if input_focus.get().is_some() || active.is_modal_running() {
         return false;
     }
     if !crate::transform_ops::active_tab_kind_present(&tree, "jackdaw.timeline") {
@@ -2037,7 +2118,9 @@ fn populate_menu(
     >,
     items: &mut QueryState<Entity, With<jackdaw_widgets::menu_bar::MenuBarItem>>,
 ) {
-    let menu_bar_entity = *menu_bar_entity.get(world);
+    let Ok(menu_bar_entity) = menu_bar_entity.get(world).map(Single::into_inner) else {
+        return;
+    };
 
     // Despawn existing menu-bar items before re-populating. Idempotent on
     // first call (nothing to remove), necessary for rebuilds when the
@@ -2190,6 +2273,7 @@ fn populate_menu(
             TopLevelMenu::View,
             vec![
                 op_entry::<view_ops::ViewToggleWireframeOp>("Toggle Wireframe"),
+                op_entry::<view_ops::ViewToggleXrayOp>("Toggle X-Ray"),
                 op_entry::<view_ops::ViewToggleBoundingBoxesOp>("Toggle Bounding Boxes"),
                 op_entry::<view_ops::ViewCycleBoundingBoxModeOp>("Cycle Bounding Box Mode"),
                 op_entry::<view_ops::ViewToggleFaceGridOp>("Toggle Face Grid"),
@@ -2430,8 +2514,8 @@ pub(crate) fn open_recent_dialog(world: &mut World) {
                     (
                         Text::new(name),
                         TextFont {
-                            font: font.clone(),
-                            font_size: jackdaw_feathers::tokens::FONT_LG,
+                            font: font.clone().into(),
+                            font_size: jackdaw_feathers::tokens::TEXT_SIZE_LG,
                             ..Default::default()
                         },
                         TextColor(jackdaw_feathers::tokens::TEXT_PRIMARY),
@@ -2440,8 +2524,8 @@ pub(crate) fn open_recent_dialog(world: &mut World) {
                     (
                         Text::new(path_display),
                         TextFont {
-                            font,
-                            font_size: jackdaw_feathers::tokens::FONT_SM,
+                            font: font.into(),
+                            font_size: jackdaw_feathers::tokens::TEXT_SIZE_SM,
                             ..Default::default()
                         },
                         TextColor(jackdaw_feathers::tokens::TEXT_SECONDARY),

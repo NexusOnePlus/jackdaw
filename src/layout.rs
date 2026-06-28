@@ -2,7 +2,7 @@ use bevy::{picking::hover::Hovered, prelude::*, ui_widgets::observe};
 use jackdaw_api::prelude::*;
 use jackdaw_feathers::{
     button::{self, ButtonOperatorCall, ButtonSize, ButtonVariant},
-    icons::IconFont,
+    icons::{EditorFont, IconFont},
     menu_bar, separator, split_panel, status_bar,
     text_edit::{self, TextEditProps},
     tokens,
@@ -22,6 +22,7 @@ use crate::{
     },
     gizmo_ops::GizmoSpaceToggleOp,
     gizmos::GizmoSpace,
+    grid_ops::{GridDecreaseOp, GridIncreaseOp, GridToggleSnapOp},
     hierarchy::{HierarchyPanel, HierarchyShowAllButton, HierarchyTreeContainer},
     inspector::Inspector,
     measure_tool::MeasureDistanceOp,
@@ -29,9 +30,14 @@ use crate::{
     pie::PieWindowModeToggleOp,
     pie_mirror::{PieViewHeader, PieViewMode, PieViewSegment},
     remote::ConnectionManager,
+    snapping::SnapSettings,
     tool_ops::{ToolRotateOp, ToolScaleOp, ToolSelectOp, ToolTranslateOp},
     viewport::SceneViewport,
+    windowing::{JackdawIcon, title_bar_repo_link},
 };
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use bevy_window_chrome::CaptionFont;
+use bevy_window_chrome::{WindowChromeTheme, spawn_window_shell};
 
 /// Discriminator for the header tab kinds the editor knows how to host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -114,208 +120,167 @@ pub struct HierarchyFilter;
 #[derive(Component)]
 pub struct Toolbar;
 
-pub fn editor_layout(
-    icon_font: &IconFont,
-    editor_font: &jackdaw_feathers::icons::EditorFont,
-) -> impl Bundle {
-    (
+fn spawn_editor_main_area(parent: &mut ChildSpawnerCommands) {
+    // Scene document (visible by default).
+    //
+    // The dock tree is materialised by `jackdaw_panels`' reconciler
+    // under this single host. The default tree (left | (center over
+    // bottom) | right) is built in `init_layout` from registered
+    // windows; the user can drag panels anywhere within it.
+    parent.spawn((
+        DocumentRoot(TabKind::Scene),
         EditorEntity,
-        // Outer shell: dark background with padding (Figma: 10px padding, bg #171717)
-        BackgroundColor(tokens::WINDOW_BG),
         Node {
             width: percent(100),
-            height: percent(100),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            padding: UiRect::all(px(tokens::PANEL_GAP)),
+            flex_grow: 1.0,
+            min_height: px(0.0),
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
             ..Default::default()
         },
         children![(
-            // Inner container: the editor workspace with rounded corners and border.
+            jackdaw_panels::reconcile::DockTreeHost::default(),
             EditorEntity,
             Node {
                 width: percent(100),
-                flex_grow: 1.0,
-                min_height: px(0.0),
-                flex_direction: FlexDirection::Column,
-                border: UiRect::all(px(1.0)),
-                border_radius: BorderRadius::all(px(8.0)),
+                height: percent(100),
+                flex_direction: FlexDirection::Row,
                 overflow: Overflow::clip(),
                 ..Default::default()
             },
-            BackgroundColor(tokens::WINDOW_BG),
-            BorderColor::all(tokens::BORDER_SUBTLE),
-            children![
-                // Integrated window header: menu bar + scene tabs +
-                // workspace dropdown + transport. Scene tabs live in
-                // the header alongside the menu (where workspace tabs
-                // used to sit); workspaces are exposed as a dropdown
-                // next to the Play pill.
-                window_header(icon_font.0.clone(), editor_font.0.clone()),
-                // Content container (flex grow). Holds both workspaces.
-                // Figma: Editor (Rows) has padding: 0px 4px
-                (
-                    EditorEntity,
-                    Node {
-                        width: percent(100),
-                        flex_grow: 1.0,
-                        min_height: px(0.0),
-                        flex_direction: FlexDirection::Column,
-                        padding: UiRect::horizontal(px(tokens::PANEL_GAP)),
-                        row_gap: px(tokens::PANEL_GAP),
-                        ..Default::default()
-                    },
-                    children![
-                    // Scene document (visible by default).
-                    //
-                    // The dock tree is materialised by `jackdaw_panels`'
-                    // reconciler under this single host. The default
-                    // tree (left | (center over bottom) | right) is
-                    // built in `init_layout` from registered windows;
-                    // the user can drag panels anywhere within it.
-                    (
-                        DocumentRoot(TabKind::Scene),
-                        EditorEntity,
-                        Node {
-                            width: percent(100),
-                            flex_grow: 1.0,
-                            min_height: px(0.0),
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Row,
-                            ..Default::default()
-                        },
-                        children![(
-                            jackdaw_panels::reconcile::DockTreeHost::default(),
-                            EditorEntity,
-                            Node {
-                                width: percent(100),
-                                height: percent(100),
-                                flex_direction: FlexDirection::Row,
-                                overflow: Overflow::clip(),
-                                ..Default::default()
-                            },
-                        )],
-                    ),
-                    // Schedule Explorer document (hidden by default).
-                    // Formerly the Remote Debug workspace; same content
-                    // repackaged as a document tab.
-                    (
-                        DocumentRoot(TabKind::ScheduleExplorer),
-                        EditorEntity,
-                        Node {
-                            width: percent(100),
-                            flex_grow: 1.0,
-                            min_height: px(0.0),
-                            flex_direction: FlexDirection::Column,
-                            display: Display::None,
-                            ..Default::default()
-                        },
-                        split_panel::panel_group(
-                            0.2,
-                            (
-                                Spawn((
-                                    split_panel::panel(1),
-                                    crate::remote::entity_browser::remote_debug_workspace_content(),
-                                )),
-                                Spawn(split_panel::panel_handle()),
-                                Spawn((
-                                    split_panel::panel(1),
-                                    crate::remote::remote_inspector::remote_inspector(),
-                                )),
-                            ),
-                        ),
-                    )
-                ],
-                ),
-                // Status bar (fixed height) with connection indicator
-                editor_status_bar()
-            ],
         )],
-    )
+    ));
+    // Schedule Explorer document (hidden by default).
+    parent.spawn((
+        DocumentRoot(TabKind::ScheduleExplorer),
+        EditorEntity,
+        Node {
+            width: percent(100),
+            flex_grow: 1.0,
+            min_height: px(0.0),
+            flex_direction: FlexDirection::Column,
+            display: Display::None,
+            ..Default::default()
+        },
+        split_panel::panel_group(
+            0.2,
+            (
+                Spawn((
+                    split_panel::panel(1),
+                    crate::remote::entity_browser::remote_debug_workspace_content(),
+                )),
+                Spawn(split_panel::panel_handle()),
+                Spawn((
+                    split_panel::panel(1),
+                    crate::remote::remote_inspector::remote_inspector(),
+                )),
+            ),
+        ),
+    ));
+    parent.spawn(editor_status_bar());
 }
 
-/// Integrated window header. Two groups separated by a flexible spacer:
-/// the **left group** owns the menu bar and the document tab strip (so
-/// tabs sit right after the `Add` menu, matching the Figma mock), and
-/// the **right group** owns the Scene View combobox and the Play/Pause
-/// pill. A flex-grow spacer between them absorbs the slack, so resizing
-/// the dropdown label (e.g. `Scene View v` -> `Animation View v`) can't
-/// shift the tabs.
-fn window_header(icon_font: Handle<Font>, editor_font: Handle<Font>) -> impl Bundle {
+/// Fills a [`spawn_window_shell`] title bar/body pair with editor UI.
+pub fn spawn_editor(
+    commands: &mut Commands,
+    title_bar: Entity,
+    body: Entity,
+    icon_font: Handle<Font>,
+    editor_font: Handle<Font>,
+    jackdaw_icon: Handle<Image>,
+) {
+    commands
+        .entity(title_bar)
+        .with_children(|title_bar_parent| {
+            title_bar_parent.spawn(window_title_bar_content(
+                icon_font.clone(),
+                editor_font.clone(),
+                jackdaw_icon,
+            ));
+        });
+    commands.entity(body).insert((
+        EditorEntity,
+        Node {
+            width: percent(100),
+            height: percent(100),
+            flex_grow: 1.0,
+            min_height: px(0.0),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::horizontal(px(tokens::PANEL_GAP)),
+            row_gap: px(tokens::PANEL_GAP),
+            overflow: Overflow::clip(),
+            ..Default::default()
+        },
+    ));
+    commands.entity(body).with_children(spawn_editor_main_area);
+}
+
+/// Editor entry: UI camera, window shell, then editor chrome/content.
+pub fn spawn_editor_layout(
+    mut commands: Commands,
+    theme: Res<WindowChromeTheme>,
+    icon_font: Res<IconFont>,
+    editor_font: Res<EditorFont>,
+    jackdaw_icon: Res<JackdawIcon>,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    caption_font: Res<CaptionFont>,
+) {
+    let slots = spawn_window_shell(
+        &mut commands,
+        &theme,
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        caption_font,
+        EditorEntity,
+    );
+    spawn_editor(
+        &mut commands,
+        slots.title_bar,
+        slots.body,
+        icon_font.0.clone(),
+        editor_font.0.clone(),
+        jackdaw_icon.0.clone(),
+    );
+}
+
+fn window_title_bar_content(
+    icon_font: Handle<Font>,
+    editor_font: Handle<Font>,
+    jackdaw_icon: Handle<Image>,
+) -> impl Bundle {
     (
         EditorEntity,
         Node {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             width: percent(100),
-            height: px(36.0),
-            flex_shrink: 0.0,
-            border_radius: BorderRadius::top(Val::Px(7.0)),
+            height: percent(100),
+            padding: UiRect::horizontal(px(tokens::SPACING_MD)),
+            column_gap: px(tokens::SPACING_MD),
             ..Default::default()
         },
-        BackgroundColor(tokens::WINDOW_BG),
+        Pickable::IGNORE,
         children![
-            // Left: menu bar + scene tab strip. The strip carries the
-            // scene tabs that drive what's being edited (formerly the
-            // workspace tab strip, which is now a dropdown on the right).
-            // `flex_shrink: 1` + `min_width: 0` let the whole left group
-            // (and therefore the scene tab strip inside it) compress
-            // when many tabs are open, instead of pushing into the
-            // right-side workspace dropdown.
+            title_bar_repo_link(jackdaw_icon),
+            menu_bar::menu_bar_shell(),
             (
+                crate::scenes::ui::SceneTabStrip,
                 EditorEntity,
+                Pickable::IGNORE,
                 Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
                     height: percent(100),
-                    column_gap: px(tokens::SPACING_LG),
+                    column_gap: px(4.0),
                     flex_shrink: 1.0,
-                    min_width: px(0.0),
                     flex_grow: 1.0,
+                    min_width: px(0.0),
+                    overflow: Overflow::scroll_x(),
                     ..Default::default()
                 },
-                children![
-                    menu_bar::menu_bar_shell(),
-                    (
-                        crate::scenes::ui::SceneTabStrip,
-                        EditorEntity,
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            height: percent(100),
-                            column_gap: px(4.0),
-                            flex_shrink: 1.0,
-                            flex_grow: 1.0,
-                            min_width: px(0.0),
-                            overflow: Overflow::scroll_x(),
-                            ..Default::default()
-                        },
-                        ScrollPosition::default(),
-                    ),
-                ],
+                ScrollPosition::default(),
             ),
-            // Right: Workspace switcher dropdown + Play/Pause transport.
-            // `flex_shrink: 0` pins the right-side controls so the
-            // scene tab strip on the left is what gives ground when
-            // space gets tight.
-            (
-                EditorEntity,
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    padding: UiRect::horizontal(px(tokens::SPACING_MD)),
-                    column_gap: px(8.0),
-                    flex_shrink: 0.0,
-                    ..Default::default()
-                },
-                children![
-                    crate::workspace_dropdown::workspace_dropdown_trigger(
-                        editor_font,
-                        icon_font.clone(),
-                    ),
-                    play_pause_controls(icon_font),
-                ],
-            ),
+            crate::workspace_dropdown::workspace_dropdown_trigger(editor_font, icon_font.clone()),
+            play_pause_controls(icon_font),
         ],
     )
 }
@@ -331,7 +296,7 @@ fn play_pause_controls(icon_font: Handle<Font>) -> impl Bundle {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
-            height: px(22.0),
+            height: px(tokens::HEADER_CONTROL_HEIGHT),
             padding: UiRect::horizontal(px(6.5)),
             column_gap: px(9.0),
             border: UiRect::all(px(1.0)),
@@ -368,8 +333,8 @@ fn pie_menu_button(icon_font: Handle<Font>) -> impl Bundle {
         children![(
             Text::new(String::from(Icon::ChevronDown.unicode())),
             TextFont {
-                font: icon_font,
-                font_size: 10.0,
+                font: icon_font.into(),
+                font_size: tokens::TEXT_SIZE_XS,
                 ..Default::default()
             },
             TextColor(tokens::HEADER_CONTROL_LABEL),
@@ -400,8 +365,8 @@ fn pie_transport_button(
         children![(
             Text::new(String::from(icon.unicode())),
             TextFont {
-                font: icon_font,
-                font_size: 13.0,
+                font: icon_font.into(),
+                font_size: tokens::TEXT_SIZE,
                 ..Default::default()
             },
             TextColor(tokens::HEADER_CONTROL_LABEL),
@@ -457,7 +422,7 @@ pub fn project_files_panel_content() -> impl Bundle {
 /// Bundle the editor toolbar and the `SceneViewport` node together so
 /// `setup_viewport` can mount the whole thing inside the dock tree's
 /// "center" leaf in one go. Public to the crate because it's spawned
-/// by the viewport plugin, not by `editor_layout` directly.
+/// by the viewport plugin, not by the editor body layout directly.
 pub(crate) fn viewport_with_toolbar() -> impl Bundle {
     (
         EditorEntity,
@@ -534,8 +499,74 @@ fn toolbar() -> impl Bundle {
             toolbar_op_button::<EditModeClipOp>(Icon::ScissorsLineDashed),
             separator::separator(separator::SeparatorProps::vertical()),
             toolbar_op_button::<PhysicsActivateOp>(Icon::Zap),
+            // Spacer pushes the grid / snap widget to the right edge.
+            (Node {
+                flex_grow: 1.0,
+                ..Default::default()
+            },),
+            // Grid-size stepper: current size between decrease / increase.
+            toolbar_op_button::<GridDecreaseOp>(Icon::Minus),
+            grid_size_label(),
+            toolbar_op_button::<GridIncreaseOp>(Icon::Plus),
+            separator::separator(separator::SeparatorProps::vertical()),
+            // Grid-snap toggle; highlights while snapping is on.
+            toolbar_op_button::<GridToggleSnapOp>(Icon::Magnet),
         ],
     )
+}
+
+/// Marker for the live grid-size readout in the viewport toolbar.
+#[derive(Component)]
+pub struct GridSizeLabel;
+
+/// A text readout of the current grid size, updated by
+/// [`update_grid_size_label`]. The font is filled in by that system from
+/// the editor font resource (the toolbar bundle has none to hand).
+fn grid_size_label() -> impl Bundle {
+    (
+        GridSizeLabel,
+        Text::new("1"),
+        TextFont {
+            font_size: tokens::TEXT_SIZE_SM,
+            ..Default::default()
+        },
+        TextColor(tokens::TEXT_SECONDARY),
+        Node {
+            align_self: AlignSelf::Center,
+            min_width: px(34.0),
+            ..Default::default()
+        },
+    )
+}
+
+/// Format a grid size for the toolbar readout, trimming a trailing
+/// `.0` so whole sizes show as `1`, `2` rather than `1.0`.
+fn format_grid_size(size: f32) -> String {
+    if size.fract() == 0.0 {
+        format!("{size:.0}")
+    } else {
+        // Powers of two below 1 are exact; default formatting renders
+        // them cleanly (e.g. 0.25, 0.0625).
+        format!("{size}")
+    }
+}
+
+/// Keep the toolbar grid readout in sync with the snap settings and give
+/// it the editor font (the toolbar bundle is built without one).
+pub fn update_grid_size_label(
+    snap: Res<SnapSettings>,
+    editor_font: Res<jackdaw_feathers::icons::EditorFont>,
+    mut labels: Query<(&mut Text, &mut TextFont), With<GridSizeLabel>>,
+) {
+    let text = format_grid_size(snap.grid_size());
+    for (mut label, mut font) in &mut labels {
+        if label.0 != text {
+            label.0 = text.clone();
+        }
+        if font.font != editor_font.0.clone().into() {
+            font.font = editor_font.0.clone().into();
+        }
+    }
 }
 
 /// Spawn a square icon-only toolbar button bound to operator `Op`.
@@ -625,8 +656,8 @@ pub fn hierarchy_content(icon_font: Handle<Font>) -> impl Bundle {
                         children![(
                             Text::new(String::from(Icon::Eye.unicode())),
                             TextFont {
-                                font: icon_font,
-                                font_size: 14.0,
+                                font: icon_font.into(),
+                                font_size: tokens::TEXT_SIZE,
                                 ..Default::default()
                             },
                             TextColor(tokens::TEXT_SECONDARY),
@@ -675,7 +706,7 @@ pub fn hierarchy_content(icon_font: Handle<Font>) -> impl Bundle {
                     (
                         Text::new(String::from(Icon::PackagePlus.unicode())),
                         TextFont {
-                            font: add_entity_icon_font,
+                            font: add_entity_icon_font.into(),
                             font_size: tokens::ICON_SM,
                             ..Default::default()
                         },
@@ -710,11 +741,11 @@ pub fn hierarchy_content(icon_font: Handle<Font>) -> impl Bundle {
                 crate::status_bar::SceneStatsText,
                 Text::default(),
                 TextFont {
-                    font_size: tokens::FONT_SM,
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_SECONDARY),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 Node {
                     padding: UiRect::all(px(tokens::SPACING_XS)),
                     flex_shrink: 0.0,
@@ -758,6 +789,7 @@ pub fn update_toolbar_button_variants(
     edit_mode: Res<EditMode>,
     active_tool: Res<ActiveTool>,
     gizmo_space: Res<GizmoSpace>,
+    snap: Res<SnapSettings>,
     active_modal: ActiveModalQuery,
     mut buttons: Query<(&ButtonOperatorCall, &mut ButtonVariant)>,
 ) {
@@ -792,6 +824,8 @@ pub fn update_toolbar_button_variants(
             *edit_mode == EditMode::BrushEdit(BrushEditMode::Knife)
         } else if call.id == PhysicsActivateOp::ID {
             *edit_mode == EditMode::Physics
+        } else if call.id == GridToggleSnapOp::ID {
+            snap.translate_snap
         } else {
             false
         };
@@ -901,7 +935,7 @@ fn editor_status_bar() -> impl Bundle {
                 status_bar::StatusBarLeft,
                 LocalizedText::new("ready"),
                 TextFont {
-                    font_size: tokens::FONT_SM,
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 bevy::feathers::theme::ThemedText,
@@ -910,7 +944,7 @@ fn editor_status_bar() -> impl Bundle {
                 status_bar::StatusBarCenter,
                 Text::default(),
                 TextFont {
-                    font_size: tokens::FONT_SM,
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_SECONDARY),
@@ -928,7 +962,7 @@ fn editor_status_bar() -> impl Bundle {
                         status_bar::StatusBarRight,
                         Text::default(),
                         TextFont {
-                            font_size: tokens::FONT_SM,
+                            font_size: tokens::TEXT_SIZE_SM,
                             ..Default::default()
                         },
                         TextColor(tokens::TEXT_SECONDARY),
@@ -942,120 +976,83 @@ fn editor_status_bar() -> impl Bundle {
 }
 
 pub fn inspector_components_content(icon_font: Handle<Font>) -> impl Bundle {
-    let save_font = icon_font.clone();
+    let save_font = icon_font;
+    // Outer horizontal row: [strip | content column]
     (
         Node {
-            flex_direction: FlexDirection::Column,
+            flex_direction: FlexDirection::Row,
             flex_grow: 1.0,
             min_height: px(0.0),
             ..Default::default()
         },
         children![
+            // Strip mount: the category tab rail is spawned here by the
+            // On<Add, InspectorCategoryStripMount> observer in InspectorPlugin.
+            (crate::inspector::category_strip::InspectorCategoryStripMount,),
+            // Content column: add-header + search header + scrollable card list.
             (
-                PieViewHeader,
                 Node {
                     flex_direction: FlexDirection::Column,
-                    width: percent(100),
-                    padding: UiRect::all(px(tokens::SPACING_SM)),
-                    row_gap: px(tokens::SPACING_XS),
-                    flex_shrink: 0.0,
-                    border_radius: BorderRadius::all(px(tokens::BORDER_RADIUS_SM)),
-                    ..Default::default()
-                },
-                BackgroundColor(Color::NONE),
-                children![
-                    (
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            column_gap: px(tokens::SPACING_XS),
-                            width: percent(100),
-                            ..Default::default()
-                        },
-                        children![(
-                            Node {
-                                flex_grow: 1.0,
-                                ..Default::default()
-                            },
-                            children![(
-                                crate::inspector::InspectorSearch,
-                                text_edit::text_edit(
-                                    TextEditProps::default()
-                                        .with_placeholder("Filter...")
-                                        .allow_empty()
-                                ),
-                            )],
-                        ),],
-                    ),
-                    (
-                        crate::inspector::AddComponentButton,
-                        Interaction::default(),
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            width: percent(100),
-                            height: px(tokens::ROW_HEIGHT),
-                            column_gap: px(tokens::SPACING_SM),
-                            border_radius: BorderRadius::all(px(tokens::BORDER_RADIUS_MD)),
-                            flex_shrink: 0.0,
-                            ..Default::default()
-                        },
-                        BackgroundColor(tokens::ELEVATED_BG),
-                        observe(
-                            |hover: On<Pointer<Over>>, mut bg: Query<&mut BackgroundColor>| {
-                                if let Ok(mut bg) = bg.get_mut(hover.event_target()) {
-                                    bg.0 = tokens::TOOLBAR_ACTIVE_BG;
-                                }
-                            },
-                        ),
-                        observe(
-                            |out: On<Pointer<Out>>, mut bg: Query<&mut BackgroundColor>| {
-                                if let Ok(mut bg) = bg.get_mut(out.event_target()) {
-                                    bg.0 = tokens::ELEVATED_BG;
-                                }
-                            },
-                        ),
-                        children![
-                            (
-                                Text::new(String::from(Icon::PackagePlus.unicode())),
-                                TextFont {
-                                    font: icon_font,
-                                    font_size: tokens::ICON_SM,
-                                    ..Default::default()
-                                },
-                                TextColor(tokens::TEXT_PRIMARY),
-                            ),
-                            (
-                                LocalizedText::new("add-component"),
-                                TextFont {
-                                    font_size: tokens::TEXT_SIZE,
-                                    weight: FontWeight::MEDIUM,
-                                    ..Default::default()
-                                },
-                                TextColor(tokens::TEXT_PRIMARY),
-                            ),
-                        ],
-                        observe(|click: On<Pointer<Click>>, mut commands: Commands| {
-                            commands.trigger(jackdaw_feathers::button::ButtonClickEvent {
-                                entity: click.event_target(),
-                            });
-                        },),
-                    ),
-                    save_to_scene_button(save_font),
-                ],
-            ),
-            (
-                Inspector,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(tokens::SPACING_SM),
-                    overflow: Overflow::scroll_y(),
                     flex_grow: 1.0,
                     min_height: px(0.0),
-                    padding: UiRect::all(px(tokens::SPACING_SM)),
                     ..Default::default()
-                }
+                },
+                children![
+                    // Add-header mount: per-category add UI populated by
+                    // `rebuild_add_header` whenever `ActiveInspectorCategory` changes.
+                    (crate::inspector::add_header::InspectorAddHeaderMount,),
+                    (
+                        PieViewHeader,
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            width: percent(100),
+                            padding: UiRect::all(px(tokens::SPACING_SM)),
+                            row_gap: px(tokens::SPACING_XS),
+                            flex_shrink: 0.0,
+                            border_radius: BorderRadius::all(px(tokens::BORDER_RADIUS_SM)),
+                            ..Default::default()
+                        },
+                        BackgroundColor(Color::NONE),
+                        children![
+                            (
+                                Node {
+                                    flex_direction: FlexDirection::Row,
+                                    align_items: AlignItems::Center,
+                                    column_gap: px(tokens::SPACING_XS),
+                                    width: percent(100),
+                                    ..Default::default()
+                                },
+                                children![(
+                                    Node {
+                                        flex_grow: 1.0,
+                                        ..Default::default()
+                                    },
+                                    children![(
+                                        crate::inspector::InspectorSearch,
+                                        text_edit::text_edit(
+                                            TextEditProps::default()
+                                                .with_placeholder("Filter...")
+                                                .allow_empty()
+                                        ),
+                                    )],
+                                ),],
+                            ),
+                            save_to_scene_button(save_font),
+                        ],
+                    ),
+                    (
+                        Inspector,
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(tokens::SPACING_SM),
+                            overflow: Overflow::scroll_y(),
+                            flex_grow: 1.0,
+                            min_height: px(0.0),
+                            padding: UiRect::all(px(tokens::SPACING_SM)),
+                            ..Default::default()
+                        }
+                    ),
+                ],
             ),
         ],
     )
@@ -1112,7 +1109,7 @@ fn save_to_scene_button(icon_font: Handle<Font>) -> impl Bundle {
             (
                 Text::new(String::from(Icon::Save.unicode())),
                 TextFont {
-                    font: icon_font,
+                    font: icon_font.into(),
                     font_size: tokens::ICON_SM,
                     ..Default::default()
                 },
@@ -1265,7 +1262,7 @@ fn pie_view_segment(
             (
                 Text::new(label),
                 TextFont {
-                    font_size: tokens::FONT_SM,
+                    font_size: tokens::TEXT_SIZE_SM,
                     ..Default::default()
                 },
                 TextColor(tokens::TEXT_SECONDARY),
@@ -1276,8 +1273,8 @@ fn pie_view_segment(
                 PieViewLiveDot,
                 Text::new(String::from(Icon::Radio.unicode())),
                 TextFont {
-                    font: icon_font,
-                    font_size: 9.0,
+                    font: icon_font.into(),
+                    font_size: tokens::TEXT_SIZE_XS,
                     ..Default::default()
                 },
                 TextColor(tokens::CATEGORY_SCENE),
@@ -1418,7 +1415,7 @@ fn live_badge() -> impl Bundle {
         children![(
             Text::new("LIVE"),
             TextFont {
-                font_size: tokens::FONT_SM,
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(crate::default_style::LIVE_ACCENT),
@@ -1500,7 +1497,7 @@ fn pie_instance_cycle_button() -> impl Bundle {
             PieFocusedInstanceLabel,
             Text::new(String::new()),
             TextFont {
-                font_size: tokens::FONT_SM,
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(tokens::TEXT_SECONDARY),
@@ -1627,7 +1624,7 @@ fn window_mode_button() -> impl Bundle {
             WindowModeLabel,
             Text::new(String::new()),
             TextFont {
-                font_size: tokens::FONT_SM,
+                font_size: tokens::TEXT_SIZE_SM,
                 ..Default::default()
             },
             TextColor(tokens::TEXT_SECONDARY),
